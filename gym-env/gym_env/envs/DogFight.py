@@ -144,6 +144,7 @@ class DogFightEnv(gym.Env):
         #  5.) Enemy absolute x position
         #  6.) Enemy absolute y position
         #  7.) Enemy distance from player
+        #  8.) Remaining time
         self.observation_space = gym.spaces.Box(
             low = np.array([
                 np.finfo(np.float64).min,
@@ -154,8 +155,10 @@ class DogFightEnv(gym.Env):
                 np.finfo(np.float64).min,
                 np.finfo(np.float64).min,
                 np.finfo(np.float64).min,
+                np.finfo(np.float64).min,
             ]),
             high = np.array([
+                np.finfo(np.float64).max,
                 np.finfo(np.float64).max,
                 np.finfo(np.float64).max,
                 np.finfo(np.float64).max,
@@ -314,13 +317,14 @@ class DogFightEnv(gym.Env):
             self.render()
 
         # Prepare to return the observations in a normalized manner
+        enemy_visible = self.player.distance_to(self.enemy) < self.player.observation_range
         px_norm = self.player.x / self.max_x
         py_norm = self.player.y / self.max_y
         tx_norm = self.target.x / self.max_x
         ty_norm = self.target.y / self.max_y
         max_d = np.sqrt(self.max_x**2 + self.max_y**2)
         td_norm = self.player.distance_to(self.target) / max_d
-        if self.enemy is None:
+        if self.enemy is None or not enemy_visible:
             ex_norm = -1.
             ey_norm = -1.
             ed_norm = -1.
@@ -329,6 +333,7 @@ class DogFightEnv(gym.Env):
             ey_norm = self.enemy.y / self.max_y
             ed_norm = self.player.distance_to(self.enemy) / max_d
             
+        time_norm = (self.step_limit - self.step_count) / self.step_limit
 
         self.state = (
             px_norm,
@@ -338,7 +343,8 @@ class DogFightEnv(gym.Env):
             td_norm,
             ex_norm,
             ey_norm,
-            ed_norm
+            ed_norm,
+            time_norm
         )
 
         # Check if we reached the maximum episode time limit and terminate if so
@@ -403,6 +409,7 @@ class DogFightEnv(gym.Env):
         ty_norm = self.target.y / self.max_y
         max_d = np.sqrt(self.max_x**2 + self.max_y**2)
         td_norm = self.player.distance_to(self.target) / max_d
+        time_norm = (self.step_limit - self.step_count) / self.step_limit
 
         self.state = (
             px_norm,
@@ -412,7 +419,8 @@ class DogFightEnv(gym.Env):
             td_norm,
             -1.,
             -1.,
-            -1.
+            -1.,
+            time_norm
         )
 
         self.player_last_dist = self.player.distance_to(self.target)

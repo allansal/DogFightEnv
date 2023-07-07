@@ -8,11 +8,13 @@ import matplotlib.pyplot as plt
 import random
 import torch
 import numpy as np
+import pandas as pd
 
 from collections import deque, namedtuple
 from itertools import count
+from tensordict import TensorDict
 from torch import nn, optim
-from torchrl.data import ReplayBuffer, ListStorage
+from torchrl.data import TensorDictPrioritizedReplayBuffer, LazyTensorStorage
 
 # Define gym environment
 env = gym.make("gym_env/DogFight")
@@ -21,51 +23,34 @@ device = torch.device("cpu")
 
 episodes_done = 0
 
-# Utilize replay memory for more efficient learning (break correlation between samples of experience)
-# Use transitions observed by agent, state, action, next state, and resulting reward
-# Replay memory also helps "stabilize" the learning process
-Transition = namedtuple("Transition", ("state", "action", "next_state", "reward"))
-
-# Limited replay memory size, sample from past X experiences
-class ReplayMemory(object):
-    def __init__(self, capacity):
-        self.memory = deque([], maxlen = capacity)
-
-    def push(self, *args):
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
-
-    def __len__(self):
-        return len(self.memory)
-
 # Set up DQN network, layer-by-layer
 class DQN(nn.Module):
     def __init__(self, n_observations, n_actions):
         super(DQN, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 128)
-        self.layer2 = nn.Linear(128, 64)
-        self.layer3 = nn.Linear(64, 32)
-        self.layer4 = nn.Linear(32, n_actions)
+        self.layer1 = nn.Linear(n_observations, 256)
+        self.layer2 = nn.Linear(256, 128)
+        self.layer3 = nn.Linear(128, 64)
+        self.layer4 = nn.Linear(64, 32)
+        self.layer5 = nn.Linear(32, n_actions)
 
     # Forward pass through NN
     def forward(self, x):
         x = nn.functional.relu(self.layer1(x))
         x = nn.functional.relu(self.layer2(x))
         x = nn.functional.relu(self.layer3(x))
-        return self.layer4(x)
+        x = nn.functional.relu(self.layer4(x))
+        return self.layer5(x)
 
 # Hyper-parameters for RL training
-BATCH_SIZE = 256
+BATCH_SIZE = 512
 GAMMA = 0.99
-LR = 1e-4
+LR = 0.75e-4
 # Eps-greedy algorithm parameters
 EPS_START = 1.00
 EPS_END = 0.03
-EPS_DECAY = 120
+EPS_DECAY = 400
 # Update rate of target network
-TAU = 0.005
+TAU = 0.004
 
 # Get possible # of actions from the environment
 n_actions = env.action_space.n
@@ -84,8 +69,8 @@ n_observations = len(state)
 policy_net = DQN(n_observations, n_actions).to(device)
 target_net = DQN(n_observations, n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
-#policy_net.load_state_dict(torch.load("./checkpoints/01249_policy.chkpt"))
-#target_net.load_state_dict(torch.load("./checkpoints/01249_target.chkpt"))
+#policy_net.load_state_dict(torch.load("./checkpoints/00300_policy.chkpt"))
+#target_net.load_state_dict(torch.load("./checkpoints/00300_target.chkpt"))
 #policy_net.eval()
 #target_net.eval()
 
@@ -93,7 +78,17 @@ target_net.load_state_dict(policy_net.state_dict())
 optimizer = optim.AdamW(policy_net.parameters(), lr = LR, amsgrad = True)
 # Set replay memory capacity to first 30 sec of experiences
 # over the last 1000 episodes
-memory = ReplayMemory(350 * 45 * env.metadata["render_fps"])
+memory = TensorDictPrioritizedReplayBuffer(
+    alpha = 0.65,
+    beta = 0.45,
+    eps = 1e-4,
+    storage = LazyTensorStorage(
+        max_size = 500 * 45 * env.metadata["render_fps"],
+        device = device
+    ),
+    batch_size = BATCH_SIZE,
+    pin_memory = False
+)
 
 # Steps done for eps-greedy algorithm
 # As steps grow, make it less likely to choose actions randomly
@@ -114,34 +109,41 @@ def optimize_model():
     if len(memory) < BATCH_SIZE:
         return
 
-    # Samples chosen randomly from memory
-    transitions = memory.sample(BATCH_SIZE)
-    # Get batch of transitions
-    # From that acquire states, actions, next states, and rewards
-    batch = Transition(*zip(*transitions))
+    batch = memory.sample()
+    states, actions, next_states, rewards, terminations = (batch.get(key) for key in ("state", "action", "next_state", "reward", "terminated"))
+    states = torch.cat([s for s in batch["state"]])
+    actions = torch.cat([s for s in batch["action"]])
+    next_states = torch.cat([s for s in batch["next_state"]])
+    rewards = torch.cat([s for s in batch["reward"]])
+    terminations = torch.cat([s for s in batch["terminated"]])
 
-    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-                                            batch.next_state)), device = device, dtype = torch.bool)
-    non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
-    state_batch = torch.cat(batch.state)
-    action_batch = torch.cat(batch.action)
-    reward_batch = torch.cat(batch.reward)
-
-    state_action_values = policy_net(state_batch).gather(1, action_batch)
+    state_action_values = policy_net(states).gather(1, actions)
 
     next_state_values = torch.zeros(BATCH_SIZE, device = device)
     with torch.no_grad():
-        next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
+        non_terminal_mask = ~terminations
+        non_terminal_next_states = next_states[non_terminal_mask]
+        if len(non_terminal_next_states) > 0:
+            # Make sure not to include zero next states (terminal states)
+            next_state_values[non_terminal_mask] = target_net(non_terminal_next_states).max(1)[0]
 
-    expected_state_action_values = (next_state_values * GAMMA) + reward_batch
-    criterion = nn.MSELoss()
-    loss = criterion(state_action_values.float(), expected_state_action_values.unsqueeze(1).float())
+    expected_state_action_values = (next_state_values * GAMMA) + rewards
+
+    criterion = nn.MSELoss(reduction = "none")
+    td_errors = criterion(state_action_values.float(), expected_state_action_values.unsqueeze(1).float())
+
+    weights = batch.get("_weight")
+    loss = (weights * td_errors).mean()
+    
     optimizer.zero_grad()
     loss.backward()
-    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
+    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 1)
     optimizer.step()
 
-num_episodes = 1250
+    batch.set("td_error", td_errors)
+    memory.update_tensordict_priority(batch)
+
+num_episodes = 1750
 episode_rewards = []
 # Train for the desired # of episodes
 i = 0
@@ -158,17 +160,18 @@ while i < num_episodes:
         # Select action
         action = select_action(state)
         # Get observation, reward, whether we fail or not
-        observation, reward, terminated, truncated, info = env.step(action.item())
+        next_state, reward, terminated, truncated, info = env.step(action.item())
         running_reward += reward
         ep_step_count += 1
         reward = torch.tensor([reward], device = device)
         done = terminated or truncated
 
-        if done:
-            next_state = None
+        if terminated:
+            next_state = torch.zeros_like(state)
         else:
-            next_state = torch.tensor(observation, dtype = torch.float32, device = device).unsqueeze(0)
+            next_state = torch.tensor(next_state, dtype = torch.float32, device = device).unsqueeze(0)
 
+        terminated = torch.tensor([terminated], dtype = torch.bool, device = device)
         # Add experience to local memory if it is a shooting state
         # otherwise push to the global memory
         if (
@@ -176,10 +179,10 @@ while i < num_episodes:
             (len(info["hit_ids"]) > 0) or
             (len(info["miss_ids"]) > 0)
         ):
-            shooting_transitions.append((state, action, next_state, reward))
+            shooting_transitions.append((state, action, next_state, reward, terminated, truncated))
             shooting_flags.append(info)
         else:
-            memory.push(state, action, next_state, reward)
+            memory.add(TensorDict({"state": state, "action": action, "next_state": next_state, "reward": reward, "terminated": terminated}, batch_size = []))
             optimize_model()
     
             target_net_state_dict = target_net.state_dict()
@@ -188,10 +191,10 @@ while i < num_episodes:
                 target_net_state_dict[key] = policy_net_state_dict[key] * TAU + target_net_state_dict[key] * (1 - TAU)
             target_net.load_state_dict(target_net_state_dict)
 
-        state = next_state
-
         if done:
             break
+
+        state = next_state
 
     for x, transition in reversed(list(enumerate(shooting_transitions))):
         for idx, hit_missile_id in reversed(list(enumerate(shooting_flags[x]["hit_ids"]))):
@@ -222,7 +225,7 @@ while i < num_episodes:
                         torch.tensor([new_reward], device = device)
                     )
                 y -= 1
-        memory.push(*(transition))
+        memory.add(TensorDict({"state": transition[0], "action": transition[1], "next_state": transition[2], "reward": transition[3], "terminated": transition[4]}, batch_size = []))
         optimize_model()
 
         target_net_state_dict = target_net.state_dict()
@@ -237,19 +240,20 @@ while i < num_episodes:
     if i % 100 == 0 or i == num_episodes - 1:
         torch.save(policy_net.state_dict(), "./checkpoints/{ep:05d}_policy.chkpt".format(ep = i))
         torch.save(target_net.state_dict(), "./checkpoints/{ep:05d}_target.chkpt".format(ep = i))
-        with open("memory.pkl", "wb") as file:
-            pickle.dump(memory, file)
 
     print(f"Episode {i:5d} ended, reward: {running_reward}")
     i += 1
 
+s = pd.Series(episode_rewards)
+s_ma = s.rolling(10).mean()
 print("Complete")
-plt.plot(range(num_episodes), episode_rewards)
+fig, ax = plt.subplots()
+ax.plot(s, label = "Raw Rewards")
+ax.plot(s_ma, label = "Rewards (moving average)")
+ax.legend()
 plt.xlabel("Episode Number")
 plt.ylabel("Episode Reward")
 plt.title("RL Reward Across Training Episodes")
 plt.savefig("./episode_reward_plot.png")
 print(f"Average reward: {sum(episode_rewards) / len(episode_rewards)}")
 print(f"Max reward during Episode {episode_rewards.index(max(episode_rewards))}: {max(episode_rewards)}")
-with open("replay_buffer.pkl", "wb") as file:
-    pickle.dump(memory, file)
