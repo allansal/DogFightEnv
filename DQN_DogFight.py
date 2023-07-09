@@ -19,7 +19,7 @@ from torchrl.data import TensorDictPrioritizedReplayBuffer, LazyTensorStorage
 # Define gym environment
 env = gym.make("gym_env/DogFight")
 
-device = torch.device("cpu")
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 episodes_done = 0
 
@@ -44,13 +44,13 @@ class DQN(nn.Module):
 # Hyper-parameters for RL training
 BATCH_SIZE = 512
 GAMMA = 0.99
-LR = 0.75e-4
+LR = 1e-4
 # Eps-greedy algorithm parameters
 EPS_START = 1.00
 EPS_END = 0.03
-EPS_DECAY = 400
+EPS_DECAY = 5000
 # Update rate of target network
-TAU = 0.004
+TAU = 0.005
 
 # Get possible # of actions from the environment
 n_actions = env.action_space.n
@@ -76,14 +76,12 @@ target_net.load_state_dict(policy_net.state_dict())
 
 # AdamW optimizer w/ parameters set
 optimizer = optim.AdamW(policy_net.parameters(), lr = LR, amsgrad = True)
-# Set replay memory capacity to first 30 sec of experiences
-# over the last 1000 episodes
 memory = TensorDictPrioritizedReplayBuffer(
     alpha = 0.65,
     beta = 0.45,
     eps = 1e-4,
     storage = LazyTensorStorage(
-        max_size = 500 * 45 * env.metadata["render_fps"],
+        max_size = 1000 * 60 * env.metadata["render_fps"],
         device = device
     ),
     batch_size = BATCH_SIZE,
@@ -143,7 +141,7 @@ def optimize_model():
     batch.set("td_error", td_errors)
     memory.update_tensordict_priority(batch)
 
-num_episodes = 1750
+num_episodes = 20000
 episode_rewards = []
 # Train for the desired # of episodes
 i = 0

@@ -14,8 +14,8 @@ class DogFightEnv(gym.Env):
     def __init__(self, render_mode = None):
         # Episode time & time limit
         self.tau = 1 / self.metadata["render_fps"]
-        # Time limit of 45 seconds per episode
-        max_episode_seconds = 45
+        # Time limit of 60 seconds per episode
+        max_episode_seconds = 60
         self.step_count = 0
         self.step_limit = max_episode_seconds * self.metadata["render_fps"]
 
@@ -83,9 +83,9 @@ class DogFightEnv(gym.Env):
 
         # Enemy properties
         self.enemy_radius = 10
-        # Enemy is 0.75 x player speed
-        self.enemy_min_speed = 0.75 * self.player_min_speed
-        self.enemy_max_speed = 0.75 * self.player_max_speed
+        # Enemy is 0.50 x player speed
+        self.enemy_min_speed = 0.50 * self.player_min_speed
+        self.enemy_max_speed = 0.50 * self.player_max_speed
         # Enemy min acceleration: 0.25 seconds from max to min speed
         # Enemy max acceleration: 2.50 seconds from min to max speed
         self.enemy_min_acceleration = (
@@ -100,19 +100,6 @@ class DogFightEnv(gym.Env):
         self.enemy_max_turn_rate = np.pi / 2.0
         # Enemy observation radius is 3/4 of the player's observation radius
         self.enemy_observation_range = 0.75 * self.player_observation_range
-        # Get the maximum time for the enemy to do a 180
-        max_turn_time = np.pi / (self.enemy_min_turn_rate)
-        # Get the maximum time that could be required for the enemy to turn
-        # back towards the game boundaries
-        turn_margin = max_turn_time * self.enemy_max_speed
-        # Define the area such that any position outside of it will result in
-        # the enemy turning back towards the center of the game area
-        self.enemy_turn_area = (
-            turn_margin,
-            turn_margin,
-            self.max_x - 2 * turn_margin,
-            self.max_y - 2 * turn_margin,
-        )
 
         # Enemy missile properties
         self.enemy_missile_radius = 3
@@ -138,13 +125,14 @@ class DogFightEnv(gym.Env):
         # Environment observation space:
         #  0.) Jet absolute x position
         #  1.) Jet absolute y position
-        #  2.) Target absolute x position
-        #  3.) Target absolute y position
+        #  2.) Target relative x position
+        #  3.) Target relative y position
         #  4.) Target distance from player
-        #  5.) Enemy absolute x position
-        #  6.) Enemy absolute y position
-        #  7.) Enemy distance from player
-        #  8.) Remaining time
+        #  5.) Enemy visibility
+        #  6.) Enemy relative x position
+        #  7.) Enemy relative y position
+        #  8.) Enemy distance from player
+        #  9.) Remaining time
         self.observation_space = gym.spaces.Box(
             low = np.array([
                 np.finfo(np.float64).min,
@@ -156,8 +144,10 @@ class DogFightEnv(gym.Env):
                 np.finfo(np.float64).min,
                 np.finfo(np.float64).min,
                 np.finfo(np.float64).min,
+                np.finfo(np.float64).min,
             ]),
             high = np.array([
+                np.finfo(np.float64).max,
                 np.finfo(np.float64).max,
                 np.finfo(np.float64).max,
                 np.finfo(np.float64).max,
@@ -192,17 +182,12 @@ class DogFightEnv(gym.Env):
             "miss_rewards" : [],   # rewards (penalties) for the missiles that missed
         }
 
-        if action == 4 or action == 5:
-            if self.target.distance_to(self.player) <= self.target_opening_range:
+        if action == 4:
+            if self.player.distance_to(self.target) <= self.target_opening_range:
                 fired_in_zone = True
             else:
                 fired_in_zone = False
-            if action == 4:
-                angle = self.player.angle_to(self.target)
-            elif self.enemy is not None and self.player.distance_to(self.enemy) <= self.player.observation_range:
-                angle = self.player.angle_to(self.enemy)
-            else:
-                angle = 0
+            angle = self.player.angle_to(self.target)
             new_missile = Missile(
                 self.player.x,
                 self.player.y,
@@ -211,12 +196,32 @@ class DogFightEnv(gym.Env):
                 self.player_missile_radius,
                 self.player_missile_range,
                 id = self.player_missile_id_counter,
-                fired_in_zone = fired_in_zone
+                fired_in_zone = fired_in_zone,
+                target = self.target
             )
             self.player.angle = new_missile.angle
             self.player.missiles.append(new_missile)
             player_missile_step_info["shoot_id"] = self.player_missile_id_counter
             self.player_missile_id_counter += 1
+        elif action == 5:
+            if self.enemy is not None and self.player.distance_to(self.enemy) <= self.player.observation_range:
+                angle = self.player.angle_to(self.enemy)
+                new_missile = Missile(
+                    self.player.x,
+                    self.player.y,
+                    self.player_missile_speed,
+                    self.player.angle + angle,
+                    self.player_missile_radius,
+                    self.player_missile_range,
+                    id = self.player_missile_id_counter,
+                    fired_in_zone = fired_in_zone,
+                    target = self.enemy
+                )
+                self.player.angle = new_missile.angle
+                self.player.missiles.append(new_missile)
+                player_missile_step_info["shoot_id"] = self.player_missile_id_counter
+                self.player_missile_id_counter += 1
+
         # Handle the enemy actions (if it is still alive)
         if self.enemy is not None:
             enemy_turn_direction = self.STRAIGHT
@@ -234,7 +239,7 @@ class DogFightEnv(gym.Env):
                     else:
                         self.enemy.guess_position = None
                 # Turn back to the center of the game area if the enemy has no target to pursue
-                elif not self.enemy.in_area(*(self.enemy_turn_area)):
+                elif not self.enemy.in_area(*(self.world_area)):
                     enemy_turn_direction = self.enemy.get_turn_direction_to(self.origin)
             # If the player is in range
             else:
@@ -271,13 +276,13 @@ class DogFightEnv(gym.Env):
                 player_missile_step_info["miss_rewards"].append(self.reward_missile_miss)
                 self.player.missiles.remove(missile)
             # Missile collides with enemy
-            elif self.enemy is not None and missile.collides_with(self.enemy):
+            elif self.enemy is not None and missile.collides_with(self.enemy) and missile.target == self.enemy:
                 player_missile_step_info["hit_ids"].append(missile.id)
                 player_missile_step_info["hit_rewards"].append(self.reward_missile_hit_enemy)
                 self.enemy = None
                 self.player.missiles.remove(missile)
             # Missile collides with target (terminating condition)
-            elif missile.collides_with(self.target) and missile.fired_in_zone == True:
+            elif missile.collides_with(self.target) and missile.fired_in_zone == True and missile.target == self.target:
                 player_missile_step_info["hit_ids"].append(missile.id)
                 player_missile_step_info["hit_rewards"].append(self.reward_missile_hit_target)
                 self.player.missiles.remove(missile)
@@ -308,30 +313,31 @@ class DogFightEnv(gym.Env):
             if self.enemy is not None:
                 distance_to_player = self.enemy.distance_to(self.player)
                 if distance_to_player <= 0.50 * self.enemy.observation_range:
-                    reward += 8 * self.reward_time_penalty
+                    reward += 0 * self.reward_time_penalty
                 elif distance_to_player <= self.enemy_observation_range:
-                    reward += 4 * self.reward_time_penalty
+                    reward += 0 * self.reward_time_penalty
         # ================================================================================
 
         if self.render_mode == "human":
             self.render()
 
         # Prepare to return the observations in a normalized manner
-        enemy_visible = self.player.distance_to(self.enemy) < self.player.observation_range
+        if self.enemy is None or self.player.distance_to(self.enemy) > self.player.observation_range:
+            enemy_visible = -1.
+            ex_norm = 0
+            ey_norm = 0
+            ed_norm = 0
+        else:
+            enemy_visible = 1.
+            ex_norm = (self.enemy.x - self.player.x) / self.player.observation_range
+            ey_norm = (self.enemy.y - self.player.y) / self.player.observation_range
+            ed_norm = self.player.distance_to(self.enemy) / self.player_observation_range
         px_norm = self.player.x / self.max_x
         py_norm = self.player.y / self.max_y
-        tx_norm = self.target.x / self.max_x
-        ty_norm = self.target.y / self.max_y
+        tx_norm = (self.target.x - self.player.x) / self.max_x
+        ty_norm = (self.target.y - self.player.y) / self.max_y
         max_d = np.sqrt(self.max_x**2 + self.max_y**2)
         td_norm = self.player.distance_to(self.target) / max_d
-        if self.enemy is None or not enemy_visible:
-            ex_norm = -1.
-            ey_norm = -1.
-            ed_norm = -1.
-        else:
-            ex_norm = self.enemy.x / self.max_x
-            ey_norm = self.enemy.y / self.max_y
-            ed_norm = self.player.distance_to(self.enemy) / max_d
             
         time_norm = (self.step_limit - self.step_count) / self.step_limit
 
@@ -341,6 +347,7 @@ class DogFightEnv(gym.Env):
             tx_norm,
             ty_norm,
             td_norm,
+            enemy_visible,
             ex_norm,
             ey_norm,
             ed_norm,
@@ -405,8 +412,8 @@ class DogFightEnv(gym.Env):
         # Normalized initial state observation preparation
         px_norm = self.player.x / self.max_x
         py_norm = self.player.y / self.max_y
-        tx_norm = self.target.x / self.max_x
-        ty_norm = self.target.y / self.max_y
+        tx_norm = (self.target.x - self.player.x) / self.max_x
+        ty_norm = (self.target.y - self.player.y) / self.max_y
         max_d = np.sqrt(self.max_x**2 + self.max_y**2)
         td_norm = self.player.distance_to(self.target) / max_d
         time_norm = (self.step_limit - self.step_count) / self.step_limit
@@ -418,8 +425,9 @@ class DogFightEnv(gym.Env):
             ty_norm,
             td_norm,
             -1.,
-            -1.,
-            -1.,
+            0.,
+            0.,
+            0.,
             time_norm
         )
 
@@ -639,11 +647,12 @@ class Entity():
 # Missiles have a limited range, and player missiles check for firing
 # within the target zone
 class Missile(Entity):
-    def __init__(self, x, y, speed, angle, radius, range, fov = 0, id = None, fired_in_zone = False):
+    def __init__(self, x, y, speed, angle, radius, range, fov = 0, id = None, fired_in_zone = False, target = None):
         super().__init__(x, y, speed, angle, radius, fov)        
         self.origin = (x, y)
         self.id = id
         self.fired_in_zone = fired_in_zone
+        self.target = target
 
         if range <= 0:
             raise ValueError(
