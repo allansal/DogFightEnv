@@ -205,6 +205,7 @@ class DogFightEnv(gym.Env):
             self.player_missile_id_counter += 1
         elif action == 5:
             if self.enemy is not None and self.player.distance_to(self.enemy) <= self.player.observation_range:
+                fired_in_zone = False
                 angle = self.player.angle_to(self.enemy)
                 new_missile = Missile(
                     self.player.x,
@@ -253,7 +254,7 @@ class DogFightEnv(gym.Env):
                 )
 
         # Move the player
-        if not action == 4:
+        if not (action == 4 or action == 5):
             self.player.move(self.tau, action)
         # Move the enemy
         if self.enemy is not None:
