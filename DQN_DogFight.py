@@ -27,19 +27,17 @@ episodes_done = 0
 class DQN(nn.Module):
     def __init__(self, n_observations, n_actions):
         super(DQN, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 256)
-        self.layer2 = nn.Linear(256, 128)
-        self.layer3 = nn.Linear(128, 64)
-        self.layer4 = nn.Linear(64, 32)
-        self.layer5 = nn.Linear(32, n_actions)
+        self.layer1 = nn.Linear(n_observations, 32)
+        self.layer2 = nn.Linear(32, 32)
+        self.layer3 = nn.Linear(32, 16)
+        self.layer4 = nn.Linear(16, n_actions)
 
     # Forward pass through NN
     def forward(self, x):
         x = nn.functional.relu(self.layer1(x))
         x = nn.functional.relu(self.layer2(x))
         x = nn.functional.relu(self.layer3(x))
-        x = nn.functional.relu(self.layer4(x))
-        return self.layer5(x)
+        return self.layer4(x)
 
 # Hyper-parameters for RL training
 BATCH_SIZE = 512
@@ -47,8 +45,8 @@ GAMMA = 0.99
 LR = 1e-4
 # Eps-greedy algorithm parameters
 EPS_START = 1.00
-EPS_END = 0.03
-EPS_DECAY = 5000
+EPS_END = 0.25
+EPS_DECAY = 500
 # Update rate of target network
 TAU = 0.005
 
@@ -69,8 +67,8 @@ n_observations = len(state)
 policy_net = DQN(n_observations, n_actions).to(device)
 target_net = DQN(n_observations, n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
-#policy_net.load_state_dict(torch.load("./checkpoints/00300_policy.chkpt"))
-#target_net.load_state_dict(torch.load("./checkpoints/00300_target.chkpt"))
+#policy_net.load_state_dict(torch.load("./checkpoints/00500_policy.chkpt"))
+#target_net.load_state_dict(torch.load("./checkpoints/00500_target.chkpt"))
 #policy_net.eval()
 #target_net.eval()
 
@@ -81,7 +79,7 @@ memory = TensorDictPrioritizedReplayBuffer(
     beta = 0.45,
     eps = 1e-4,
     storage = LazyTensorStorage(
-        max_size = 1000 * 60 * env.metadata["render_fps"],
+        max_size = 750 * 60 * env.metadata["render_fps"],
         device = device
     ),
     batch_size = BATCH_SIZE,
@@ -117,15 +115,10 @@ def optimize_model():
 
     state_action_values = policy_net(states).gather(1, actions)
 
-    next_state_values = torch.zeros(BATCH_SIZE, device = device)
     with torch.no_grad():
-        non_terminal_mask = ~terminations
-        non_terminal_next_states = next_states[non_terminal_mask]
-        if len(non_terminal_next_states) > 0:
-            # Make sure not to include zero next states (terminal states)
-            next_state_values[non_terminal_mask] = target_net(non_terminal_next_states).max(1)[0]
+        next_state_values = target_net(next_states).max(1)[0]
 
-    expected_state_action_values = (next_state_values * GAMMA) + rewards
+    expected_state_action_values = (next_state_values * GAMMA) * (1. - terminations.float()) + rewards
 
     criterion = nn.MSELoss(reduction = "none")
     td_errors = criterion(state_action_values.float(), expected_state_action_values.unsqueeze(1).float())
@@ -141,7 +134,7 @@ def optimize_model():
     batch.set("td_error", td_errors)
     memory.update_tensordict_priority(batch)
 
-num_episodes = 20000
+num_episodes = 5000
 episode_rewards = []
 # Train for the desired # of episodes
 i = 0
@@ -164,10 +157,7 @@ while i < num_episodes:
         reward = torch.tensor([reward], device = device)
         done = terminated or truncated
 
-        if terminated:
-            next_state = torch.zeros_like(state)
-        else:
-            next_state = torch.tensor(next_state, dtype = torch.float32, device = device).unsqueeze(0)
+        next_state = torch.tensor(next_state, dtype = torch.float32, device = device).unsqueeze(0)
 
         terminated = torch.tensor([terminated], dtype = torch.bool, device = device)
         # Add experience to local memory if it is a shooting state
@@ -177,7 +167,7 @@ while i < num_episodes:
             (len(info["hit_ids"]) > 0) or
             (len(info["miss_ids"]) > 0)
         ):
-            shooting_transitions.append((state, action, next_state, reward, terminated, truncated))
+            shooting_transitions.append((state, action, next_state, reward, terminated))
             shooting_flags.append(info)
         else:
             memory.add(TensorDict({"state": state, "action": action, "next_state": next_state, "reward": reward, "terminated": terminated}, batch_size = []))
