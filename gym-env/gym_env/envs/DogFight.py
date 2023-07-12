@@ -7,7 +7,7 @@ from typing import Optional, Union
 class DogFightEnv(gym.Env):
     metadata = {
         "render_fps" : 15,
-        "render_modes" : ["human"]
+        "render_modes" : ["human", "rgb_array"]
     }
 
     # Initialize the environment
@@ -24,16 +24,15 @@ class DogFightEnv(gym.Env):
         self.screen_size = (800, 800)
         self.screen = None
         self.clock = None
-        self.color_clear = (0, 0, 0)
-        self.color_clear_alpha = (0, 0, 0, 0)
-        self.color_player = (0, 255, 0, 255)
-        self.color_player_vision = (0, 255, 0, 64)
-        self.color_enemy = (255, 0, 0, 255)
-        self.color_enemy_vision = (255, 0, 0, 64)
-        self.color_target = (0, 255, 255, 255)
-        self.color_target_zone = (0, 255, 255, 64)
-        self.color_missile = (255, 255, 255, 255)
-        self.color_missile_enemy = (255, 255, 0, 255)
+        self.color_white  = (255, 255, 255, 255)
+        self.color_gray   = ( 64,  64,  64, 255)
+        self.color_black  = (  0,   0,   0, 255)
+        self.color_clear  = (  0,   0,   0,   0)
+        self.color_green  = (  0, 255,   0, 255)
+        self.color_red    = (255,   0,   0, 255)
+        self.color_teal   = (  0, 255, 255, 255)
+        self.color_blue   = (  0,   0, 255, 255)
+        self.color_orange = (255, 165,   0, 255)
 
         # Game area settings (for out of bounds checks and other things)
         self.min_x = 0
@@ -52,7 +51,7 @@ class DogFightEnv(gym.Env):
         self.RIGHT    = -1
 
         # Player properties
-        self.player_radius = 10
+        self.player_radius = 20
         # Player min speed: 10 seconds to cross game area
         # Player max speed:  5 seconds to cross game area
         self.player_min_speed = self.max_x / 10
@@ -70,20 +69,20 @@ class DogFightEnv(gym.Env):
         self.player_min_turn_rate = np.pi / 4.0
         self.player_max_turn_rate = np.pi / 2.0
         # Player observation radius is 1/4 the width of the game area
-        self.player_observation_range = 0.25 * self.max_x
+        self.player_observation_range = 0.35 * self.max_x
         self.player_last_dist = None
 
         # Player missile properties
         # Track the missiles for properly assigning delayed rewards outside env
         self.player_missile_id_counter = 0
-        self.player_missile_radius = 3
+        self.player_missile_radius = 6
         self.player_missile_speed = 2.0 * self.player_max_speed
         self.player_missile_range = 3 * self.player_observation_range
         # Bounds of player missile's random angle offset
         self.player_missile_angle_offset = 0.04
 
         # Enemy properties
-        self.enemy_radius = 10
+        self.enemy_radius = 20
         # Enemy is 0.8 x player speed
         self.enemy_min_speed = 0.80 * self.player_min_speed
         self.enemy_max_speed = 0.80 * self.player_max_speed
@@ -100,21 +99,21 @@ class DogFightEnv(gym.Env):
         self.enemy_min_turn_rate = np.pi / 4.0
         self.enemy_max_turn_rate = np.pi / 2.0
         # Enemy observation radius is 3/4 of the player's observation radius
-        self.enemy_observation_range = 1.50 * self.player_observation_range
+        self.enemy_observation_range = 1.25 * self.player_observation_range
         # 0.35 radians (~20 degree firing FOV for the enemy)
         self.enemy_firing_fov = 0.35
 
         # Enemy missile properties
-        self.enemy_missile_radius = 3
+        self.enemy_missile_radius = 6
         self.enemy_missile_speed = 0.5 * self.player_missile_speed
         self.enemy_missile_range = 3 * self.enemy_observation_range
         # Bounds of enemy missile's random angle offset
         self.enemy_missile_angle_offset = 0.04
 
         # Target properties
-        self.target_radius = 3.0 * self.player_radius
+        self.target_radius = 30
         # Range from which player missiles will destroy the target
-        self.target_opening_range = 0.50 * self.player_missile_range
+        self.target_opening_range = 0.35 * self.player_missile_range
 
         # Reward definitions
         self.reward_missile_miss = -0.75 * self.tau
@@ -376,10 +375,10 @@ class DogFightEnv(gym.Env):
         # Prepare to return the observations in a normalized manner
         if self.enemy.dead or self.player.distance_to(self.enemy) > self.player.observation_range:
             enemy_visible = 0.
-            ex_norm = 0
-            ey_norm = 0
-            ed_norm = 0
-            ea_norm = 0
+            ex_norm = 0.
+            ey_norm = 0.
+            ed_norm = 0.
+            ea_norm = 0.
         else:
             enemy_visible = 1.
             ex_norm = (self.enemy.x - self.player.x) / self.player.observation_range
@@ -397,10 +396,10 @@ class DogFightEnv(gym.Env):
             ema_norm = self.enemy.missile.angle_to(self.player) / np.pi
         else:
             enemy_missile_visible = 0.
-            emx_norm = 0
-            emy_norm = 0
-            emd_norm = 0
-            ema_norm = 0
+            emx_norm = 0.
+            emy_norm = 0.
+            emd_norm = 0.
+            ema_norm = 0.
         px_norm = self.player.x / self.max_x
         py_norm = self.player.y / self.max_y
         tx_norm = (self.target.x - self.player.x) / self.max_x
@@ -425,27 +424,6 @@ class DogFightEnv(gym.Env):
             emd_norm,
             ema_norm
         )
-#        print(f"Player X: {self.player.x}")
-#        print(f"Player Y: {self.player.y}")
-#        print(f"Target rel X: {self.target.x - self.player.x}")
-#        print(f"Target rel Y: {self.target.y - self.player.y}")
-#        print(f"Target distance: {self.player.distance_to(self.target)}")
-#        if enemy_visible:
-#            print(f"Enemy rel X: {self.enemy.x - self.player.x}")
-#            print(f"Enemy rel Y: {self.enemy.y - self.player.y}")
-#            print(f"Enemy distance: {self.player.distance_to(self.enemy)}")
-#        else:
-#            print(f"Enemy rel X: {ex_norm}")
-#            print(f"Enemy rel Y: {ey_norm}")
-#            print(f"Enemy distance: {ed_norm}")
-#        if enemy_missile_visible:
-#            print(f"Enemy miss rel X: {self.enemy.missile.x - self.player.x}")
-#            print(f"Enemy miss rel Y: {self.enemy.missile.y - self.player.y}")
-#            print(f"Enemy miss distance: {self.player.distance_to(self.enemy.missile)}")
-#        else:
-#            print(f"Enemy miss rel X: {emx_norm}")
-#            print(f"Enemy miss rel Y: {emy_norm}")
-#            print(f"Enemy miss distance: {emd_norm}")
 
         # Check if we reached the maximum episode time limit and terminate if so
         self.step_count += 1
@@ -538,110 +516,107 @@ class DogFightEnv(gym.Env):
 
         return np.array(self.state, dtype = np.float64), {}
 
+    def _get_jet_vertices(self, jet):
+        jet_vertices = [
+            (
+                jet.x + jet.radius * np.cos(jet.angle),
+                jet.y + jet.radius * np.sin(jet.angle)
+            ),
+            (
+                jet.x + (0.75 * jet.radius) * np.cos(jet.angle + 2 * np.pi / 3),
+                jet.y + (0.75 * jet.radius) * np.sin(jet.angle + 2 * np.pi / 3)
+            ),
+            (
+                jet.x + (0.75 * jet.radius) * np.cos(jet.angle + 4 * np.pi / 3),
+                jet.y + (0.75 * jet.radius) * np.sin(jet.angle + 4 * np.pi / 3)
+            )
+        ]
+        return jet_vertices
+
     # Draw the environment for human rendering mode
     # Note: multiple separate transparent surfaces are required for each
     # transparent shape, or else they will not blend together properly
     # when blitted to the lower surface or directly to the screen
     def render(self):
+        if self.render_mode is None:
+            gym.logger.warn(
+                "Env render method called without specified render mode"
+            )
+            return
+
         # Initialize screen with PyGame
         if self.screen is None:
+            pygame.init()
             if self.render_mode == "human":
                 pygame.display.init()
-                self.screen  = pygame.display.set_mode(self.screen_size)
-                # Transparent surface for the player's observation circle
-                self.pobs_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
-                # Transparent surface for the enemy's observation circle
-                self.eobs_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
-                # Transparent surface for the target's firing zone circle
-                self.zone_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
-                # Lower surface to blit all transparent surfaces and direct
-                # drawing of opaque shapes
-                self.lower_surface = pygame.Surface(self.screen_size)
-
+                self.screen = pygame.display.set_mode(self.screen_size)
+            else:
+                self.screen = pygame.Surface(self.screen_size)
+            self.lower_surface = pygame.Surface(self.screen_size)
+            self.lower_surface = pygame.transform.flip(self.lower_surface, flip_x = True, flip_y = False)
+            self.shadow_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
+            self.pobs_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
+            self.zone_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
+            self.tghost_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
         if self.clock is None:
             self.clock = pygame.time.Clock()
 
-        if self.state is None:
-            return None
-
         # Reset / clear the surfaces each frame
-        self.screen.fill(self.color_clear)
-        self.lower_surface.fill(self.color_clear)
-        self.pobs_surface.fill(self.color_clear_alpha)
-        self.eobs_surface.fill(self.color_clear_alpha)
-        self.zone_surface.fill(self.color_clear_alpha)
+        self.lower_surface.fill(self.color_black)
+        self.shadow_surface.fill(self.color_black)
+        self.zone_surface.fill(self.color_clear)
+        self.tghost_surface.fill(self.color_black)
+        self.pobs_surface.fill(self.color_clear)
 
-        # Draw the transparent stuff first
+        # Draw the target firing zone and the target itself at the bottom of
+        # the screen since it is considered a ground target
         pygame.draw.circle(
             self.zone_surface,
-            self.color_target_zone,
-            (self.target.x, self.max_y - self.target.y),
+            self.color_gray,
+            (self.target.x, self.target.y),
             self.target_opening_range
         )
-        pygame.draw.circle(
-            self.pobs_surface,
-            self.color_player_vision,
-            (self.player.x, self.max_y - self.player.y),
-            self.player.observation_range
-        )
-        if not self.enemy.dead:
-            pygame.draw.circle(
-                self.eobs_surface,
-                self.color_enemy_vision,
-                (self.enemy.x, self.max_y - self.enemy.y),
-                self.enemy.observation_range
-            )
-        # Blit the transparent surfaces to a common lower surface
-        # for proper blending
         self.lower_surface.blit(self.zone_surface, (0, 0))
-        self.lower_surface.blit(self.eobs_surface, (0, 0))
-        self.lower_surface.blit(self.pobs_surface, (0, 0))
-
-        # Now draw the opaque stuff
         # Draw the target
         pygame.draw.circle(
             self.lower_surface,
-            self.color_target,
-            (self.target.x, self.max_y - self.target.y),
+            self.color_blue,
+            (self.target.x, self.target.y),
             self.target.radius
         )
+
         # Draw the jets
         for jet in [self.player, self.enemy]:
             if jet == self.player or (jet == self.enemy and not self.enemy.dead):
-                jet_vertices = [
-                    (
-                        jet.x + jet.radius * np.cos(jet.angle),
-                        self.max_y - (jet.y + jet.radius * np.sin(jet.angle))
-                    ),
-                    (
-                        jet.x + (0.75 * jet.radius) * np.cos(jet.angle + 2 * np.pi / 3),
-                        self.max_y - (jet.y + (0.75 * jet.radius) * np.sin(jet.angle + 2 * np.pi / 3))
-                    ),
-                    (
-                        jet.x + (0.75 * jet.radius) * np.cos(jet.angle + 4 * np.pi / 3),
-                        self.max_y - (jet.y + (0.75 * jet.radius) * np.sin(jet.angle + 4 * np.pi / 3))
-                    )
-                ]
-                color = self.color_player if jet is self.player else self.color_enemy
+                jet_vertices = self._get_jet_vertices(jet)
+                color = self.color_green if jet is self.player else self.color_red
                 pygame.draw.polygon(self.lower_surface, color, jet_vertices)
+
+        # Draw enemy missile
+        if self.enemy.missile is not None:
+            pygame.draw.circle(
+                self.lower_surface,
+                self.color_orange,
+                (self.enemy.missile.x, self.enemy.missile.y),
+                self.enemy.missile.radius
+            )
+
+        # Draw the "shadow" to simulate the player's limited observation range
+        pygame.draw.circle(self.shadow_surface, self.color_gray, (self.target.x, self.target.y), self.target_opening_range)
+        pygame.draw.circle(self.shadow_surface, self.color_blue, (self.target.x, self.target.y), self.target.radius)
+        pygame.draw.circle(self.pobs_surface, self.color_black, (self.player.x, self.player.y), self.player_observation_range)
+        self.shadow_surface.blit(self.pobs_surface, (0, 0), special_flags = pygame.BLEND_RGBA_SUB)
+        self.lower_surface.blit(self.shadow_surface, (0, 0))
 
         # Draw the player missiles
         for missile in self.player.missiles:
             pygame.draw.circle(
                 self.lower_surface,
-                self.color_missile,
-                (missile.x, self.max_y - missile.y),
+                self.color_white,
+                (missile.x, missile.y),
                 missile.radius
             )
-        if self.enemy.missile is not None:
-            pygame.draw.circle(
-                self.lower_surface,
-                self.color_missile_enemy,
-                (self.enemy.missile.x, self.max_y - self.enemy.missile.y),
-                self.enemy.missile.radius
-            )
-            
-        # Draw the lower surface on the screen
+
         self.screen.blit(self.lower_surface, (0, 0))
 
         # PyGame event handling and timing
@@ -894,11 +869,11 @@ class Player(Jet):
         self.prev_move_dir = prev_move_dir
 
     def move(self, tau, action):
-        if action == 1:
+        if action == 0:
             self.y += self.speed * tau
-        elif action == 2:
+        elif action == 1:
             self.y -= self.speed * tau
-        elif action == 3:
+        elif action == 2:
             self.x -= self.speed * tau
         else:
             self.x += self.speed * tau

@@ -85,6 +85,7 @@ memory = TensorDictPrioritizedReplayBuffer(
     batch_size = BATCH_SIZE,
     pin_memory = False
 )
+#memory.load_state_dict(torch.load("./checkpoints/00999_memory.chkpt"))
 
 # Steps done for eps-greedy algorithm
 # As steps grow, make it less likely to choose actions randomly
@@ -228,7 +229,7 @@ for i in range(num_episodes):
     if (i + 1) % 100 == 0 or (i + 1) == num_episodes:
         torch.save(policy_net.state_dict(), f"./checkpoints/{i:05d}_policy.chkpt")
         torch.save(target_net.state_dict(), f"./checkpoints/{i:05d}_target.chkpt")
-        torch.save(memory, f"./checkpoints/{i:05d}_memory.chkpt")
+        torch.save(memory.state_dict(), f"./checkpoints/{i:05d}_memory.chkpt")
 
     print(f"Episode {i:5d} ended, reward: {running_reward}")
 
