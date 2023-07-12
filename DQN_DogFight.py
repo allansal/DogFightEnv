@@ -1,5 +1,3 @@
-import gym_env
-
 import pickle
 import gymnasium as gym
 import math
@@ -9,6 +7,8 @@ import random
 import torch
 import numpy as np
 import pandas as pd
+
+import gym_env
 
 from collections import deque, namedtuple
 from itertools import count
@@ -40,13 +40,13 @@ class DQN(nn.Module):
         return self.layer4(x)
 
 # Hyper-parameters for RL training
-BATCH_SIZE = 512
+BATCH_SIZE = 128
 GAMMA = 0.99
-LR = 1e-4
+LR = 5e-4
 # Eps-greedy algorithm parameters
 EPS_START = 1.00
-EPS_END = 0.25
-EPS_DECAY = 500
+EPS_END = 0.05
+EPS_DECAY = 100
 # Update rate of target network
 TAU = 0.005
 
@@ -67,8 +67,8 @@ n_observations = len(state)
 policy_net = DQN(n_observations, n_actions).to(device)
 target_net = DQN(n_observations, n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
-#policy_net.load_state_dict(torch.load("./checkpoints/00500_policy.chkpt"))
-#target_net.load_state_dict(torch.load("./checkpoints/00500_target.chkpt"))
+#policy_net.load_state_dict(torch.load("./checkpoints/00999_policy.chkpt"))
+#target_net.load_state_dict(torch.load("./checkpoints/00999_target.chkpt"))
 #policy_net.eval()
 #target_net.eval()
 
@@ -77,9 +77,9 @@ optimizer = optim.AdamW(policy_net.parameters(), lr = LR, amsgrad = True)
 memory = TensorDictPrioritizedReplayBuffer(
     alpha = 0.65,
     beta = 0.45,
-    eps = 1e-4,
+    eps = 1e-6,
     storage = LazyTensorStorage(
-        max_size = 750 * 60 * env.metadata["render_fps"],
+        max_size = 125 * 60 * env.metadata["render_fps"],
         device = device
     ),
     batch_size = BATCH_SIZE,
@@ -118,7 +118,7 @@ def optimize_model():
     with torch.no_grad():
         next_state_values = target_net(next_states).max(1)[0]
 
-    expected_state_action_values = (next_state_values * GAMMA) * (1. - terminations.float()) + rewards
+    expected_state_action_values = rewards + (1. - terminations.float()) * GAMMA * next_state_values
 
     criterion = nn.MSELoss(reduction = "none")
     td_errors = criterion(state_action_values.float(), expected_state_action_values.unsqueeze(1).float())
@@ -134,11 +134,11 @@ def optimize_model():
     batch.set("td_error", td_errors)
     memory.update_tensordict_priority(batch)
 
-num_episodes = 5000
+num_episodes = 1000
 episode_rewards = []
 # Train for the desired # of episodes
 i = 0
-while i < num_episodes:
+for i in range(num_episodes):
     ep_step_count = 0
     # Get initial state of episode
     state, info = env.reset()
@@ -225,12 +225,12 @@ while i < num_episodes:
     episodes_done += 1
     episode_rewards.append(running_reward)
 
-    if i % 100 == 0 or i == num_episodes - 1:
-        torch.save(policy_net.state_dict(), "./checkpoints/{ep:05d}_policy.chkpt".format(ep = i))
-        torch.save(target_net.state_dict(), "./checkpoints/{ep:05d}_target.chkpt".format(ep = i))
+    if (i + 1) % 100 == 0 or (i + 1) == num_episodes:
+        torch.save(policy_net.state_dict(), f"./checkpoints/{i:05d}_policy.chkpt")
+        torch.save(target_net.state_dict(), f"./checkpoints/{i:05d}_target.chkpt")
+        torch.save(memory, f"./checkpoints/{i:05d}_memory.chkpt")
 
     print(f"Episode {i:5d} ended, reward: {running_reward}")
-    i += 1
 
 s = pd.Series(episode_rewards)
 s_ma = s.rolling(10).mean()
