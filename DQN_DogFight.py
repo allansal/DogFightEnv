@@ -14,10 +14,75 @@ from collections import deque, namedtuple
 from itertools import count
 from tensordict import TensorDict
 from torch import nn, optim
-from torchrl.data import TensorDictPrioritizedReplayBuffer, LazyTensorStorage
+from torchrl.data import TensorDictPrioritizedReplayBuffer, LazyMemmapStorage
+from torchvision import transforms as T
+import torch.nn.functional as F
 
-# Define gym environment
+# Custom wrappers
+
+class SkipFrame(gym.Wrapper):
+    def __init__(self, env, skip):
+        """Return only every `skip`-th frame"""
+        super().__init__(env)
+        self._skip = skip
+
+    def step(self, action):
+        """Repeat action, and sum reward"""
+        total_reward = 0.0
+        for i in range(self._skip):
+            # Accumulate reward and repeat the same action
+            obs, reward, done, trunk, info = self.env.step(action)
+            total_reward += reward
+            if done:
+                break
+        return obs, total_reward, done, trunk, info
+
+
+class GrayScaleObservation(gym.ObservationWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        obs_shape = self.observation_space.shape[:2]
+        self.observation_space = gym.spaces.Box(low=0, high=255, shape=obs_shape, dtype=np.uint8)
+
+    def permute_orientation(self, observation):
+        # permute [H, W, C] array to [C, H, W] tensor
+        observation = np.transpose(observation, (2, 0, 1))
+        observation = torch.tensor(observation.copy(), dtype=torch.float)
+        return observation
+
+    def observation(self, observation):
+        observation = self.permute_orientation(observation)
+        transform = T.Grayscale()
+        observation = transform(observation)
+        return observation
+
+
+class ResizeObservation(gym.ObservationWrapper):
+    def __init__(self, env, shape):
+        super().__init__(env)
+        if isinstance(shape, int):
+            self.shape = (shape, shape)
+        else:
+            self.shape = tuple(shape)
+
+        obs_shape = self.shape + self.observation_space.shape[2:]
+        self.observation_space = gym.spaces.Box(low=0, high=255, shape=obs_shape, dtype=np.uint8)
+
+    def observation(self, observation):
+        transforms = T.Compose(
+            [T.Resize(self.shape, antialias = None), T.Normalize(0, 255)]
+        )
+        observation = transforms(observation).squeeze(0)
+        return observation
+
+# Define gym environment and apply wrappers
 env = gym.make("gym_env/DogFight")
+env = SkipFrame(env, skip = 1)
+env = GrayScaleObservation(env)
+env = ResizeObservation(env, shape = 100)
+env = gym.wrappers.FrameStack(env, num_stack = 4, lz4_compress = False)
+
+#env = gym.wrappers.FrameStack(env, 4, lz4_compress = True)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -25,35 +90,94 @@ episodes_done = 0
 
 # Set up DQN network, layer-by-layer
 class DQN(nn.Module):
-    def __init__(self, n_observations, n_actions):
-        super(DQN, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 32)
-        self.layer2 = nn.Linear(32, 32)
-        self.layer3 = nn.Linear(32, 16)
-        self.layer4 = nn.Linear(16, n_actions)
+    def __init__(self, n_state_dim, n_actions):
+        super().__init__()
+        c, w, h = n_state_dim
 
-    # Forward pass through NN
+        self.conv1 = nn.Conv2d(c, 32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+
+        # Forward propagate a dummy input to calculate the flattened size
+        dummy_input = torch.zeros(32, c, w, h)
+        conv_output = self._forward_conv(dummy_input)
+        flattened_size = int(np.prod(conv_output.size()))
+
+        self.fc1 = nn.Linear(flattened_size, 512)  # This size depends on the output of your conv layers
+        self.fc2 = nn.Linear(512, n_actions)
+
+    def _forward_conv(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        return x
+
     def forward(self, x):
-        x = nn.functional.relu(self.layer1(x))
-        x = nn.functional.relu(self.layer2(x))
-        x = nn.functional.relu(self.layer3(x))
-        return self.layer4(x)
+        x = self._forward_conv(x)
+        x = x.view(x.size(0), -1)  # flatten the tensor
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
+#    def forward(self, x):
+#        x = F.relu(self.conv1(x))
+#        x = F.relu(self.conv2(x))
+#        x = F.relu(self.conv3(x))
+#        x = x.view(x.size(0), -1)  # flatten the tensor
+#        x = F.relu(self.fc1(x))
+#        return self.fc2(x)
+
+
+#self.online = nn.Sequential(
+#            nn.Conv2d(in_channels=c, out_channels=32, kernel_size=8, stride=4),
+#            nn.ReLU(),
+#            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2),
+#            nn.ReLU(),
+#            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1),
+#            nn.ReLU(),
+#            nn.Flatten(),
+#            nn.Linear(3136, 512),
+#            nn.ReLU(),
+#            nn.Linear(512, output_dim),
+#        )
+#
+#        self.target = copy.deepcopy(self.online)
+#
+#        # Q_target parameters are frozen.
+#        for p in self.target.parameters():
+#            p.requires_grad = False
+#        self.
+#        super().__init__()
+#        c, w, h = n_state_dim
+#
+#        self.conv1 = nn.Conv2d(c, 32, kernel_size=8, stride=4)
+#        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+#        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+#        self.fc1 = nn.Linear(22*22*64, 512)  # This size depends on the output of your conv layers
+#        self.fc2 = nn.Linear(512, n_actions)
+#
+#    def forward(self, x):
+#        x = torch.relu(self.conv1(x))
+#        x = torch.relu(self.conv2(x))
+#        x = torch.relu(self.conv3(x))
+#        x = x.view(x.size(0), -1)  # Flatten the tensor
+#        x = torch.relu(self.fc1(x))
+#        return self.fc2(x)
 
 # Hyper-parameters for RL training
-BATCH_SIZE = 128
+BATCH_SIZE = 32
 GAMMA = 0.99
-LR = 5e-4
+LR = 2.5e-4
 # Eps-greedy algorithm parameters
 EPS_START = 1.00
 EPS_END = 0.05
 EPS_DECAY = 100
 # Update rate of target network
-TAU = 0.005
+TAU = 0.0025
 
 # Get possible # of actions from the environment
 n_actions = env.action_space.n
 # Reset env to initial state, get initial observations for agent
 state, info = env.reset()
+print(f"State shape: {state.shape}")
 # Get the # of observations of the state (size of input layer)
 n_observations = len(state)
 
@@ -64,9 +188,13 @@ n_observations = len(state)
 # Target has same structure as policy NN, but parameters are frozen.
 # Target network updated only occasionally to prevent prevent extreme
 # divergence or the agent "forgetting" how to act properly.
-policy_net = DQN(n_observations, n_actions).to(device)
-target_net = DQN(n_observations, n_actions).to(device)
+#policy_net = DQN(n_observations, n_actions).to(device)
+#target_net = DQN(n_observations, n_actions).to(device)
+policy_net = DQN(state.shape, n_actions).to(device)
+target_net = DQN(state.shape, n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
+for p in target_net.parameters():
+    p.requires_grad = False
 #policy_net.load_state_dict(torch.load("./checkpoints/00999_policy.chkpt"))
 #target_net.load_state_dict(torch.load("./checkpoints/00999_target.chkpt"))
 #policy_net.eval()
@@ -78,8 +206,8 @@ memory = TensorDictPrioritizedReplayBuffer(
     alpha = 0.65,
     beta = 0.45,
     eps = 1e-6,
-    storage = LazyTensorStorage(
-        max_size = 125 * 60 * env.metadata["render_fps"],
+    storage = LazyMemmapStorage(
+        max_size = 100000,
         device = device
     ),
     batch_size = BATCH_SIZE,
@@ -94,7 +222,12 @@ def select_action(state):
     eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * episodes_done / EPS_DECAY)
     if eps_threshold < sample:
         with torch.no_grad():
-            return policy_net(state).max(1)[1].view(1, 1)
+            return torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
+#            tmp = policy_net(state).max(1)
+#            print(f"policy_net(state).max(1) shape: {tmp.shape}")
+            return policy_net(state).max(1)
+#            return policy_net(state).max(1)[1][0].view(1, 1)
+#            return policy_net(state).max(1)[1].view(1, 1)
     else:
         return torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
 
@@ -106,15 +239,14 @@ def optimize_model():
     if len(memory) < BATCH_SIZE:
         return
 
-    batch = memory.sample()
+    batch = memory.sample().to(device)
     states, actions, next_states, rewards, terminations = (batch.get(key) for key in ("state", "action", "next_state", "reward", "terminated"))
-    states = torch.cat([s for s in batch["state"]])
-    actions = torch.cat([s for s in batch["action"]])
-    next_states = torch.cat([s for s in batch["next_state"]])
-    rewards = torch.cat([s for s in batch["reward"]])
-    terminations = torch.cat([s for s in batch["terminated"]])
-
+    actions = actions.squeeze()
+    rewards = rewards.squeeze()
+    terminations = terminations.squeeze()
+#    print(f"Shapes: {states.shape}, {actions.shape}, {next_states.shape}, {rewards.shape}, {terminations.shape}")
     state_action_values = policy_net(states).gather(1, actions)
+#    state_action_values = policy_net(states).gather(1, actions)
 
     with torch.no_grad():
         next_state_values = target_net(next_states).max(1)[0]
@@ -135,7 +267,7 @@ def optimize_model():
     batch.set("td_error", td_errors)
     memory.update_tensordict_priority(batch)
 
-num_episodes = 1000
+num_episodes = 10
 episode_rewards = []
 # Train for the desired # of episodes
 i = 0
@@ -143,9 +275,9 @@ for i in range(num_episodes):
     ep_step_count = 0
     # Get initial state of episode
     state, info = env.reset()
-    state = torch.tensor(state, dtype = torch.float32, device = device).unsqueeze(0)
-    shooting_transitions = []
-    shooting_flags = []
+#    state = np.array(state)
+    state = torch.from_numpy(np.array(state)).to(device)
+#    state = torch.tensor(state, dtype = torch.float32, device = device).unsqueeze(0)
     running_reward = 0
     # Continue until termination
     for t in count():
@@ -158,74 +290,29 @@ for i in range(num_episodes):
         reward = torch.tensor([reward], device = device)
         done = terminated or truncated
 
-        next_state = torch.tensor(next_state, dtype = torch.float32, device = device).unsqueeze(0)
-
-        terminated = torch.tensor([terminated], dtype = torch.bool, device = device)
-        # Add experience to local memory if it is a shooting state
-        # otherwise push to the global memory
-        if (
-            (info["shoot_id"] is not None) or
-            (len(info["hit_ids"]) > 0) or
-            (len(info["miss_ids"]) > 0)
-        ):
-            shooting_transitions.append((state, action, next_state, reward, terminated))
-            shooting_flags.append(info)
-        else:
-            memory.add(TensorDict({"state": state, "action": action, "next_state": next_state, "reward": reward, "terminated": terminated}, batch_size = []))
-            optimize_model()
-    
-            target_net_state_dict = target_net.state_dict()
-            policy_net_state_dict = policy_net.state_dict()
-            for key in policy_net_state_dict:
-                target_net_state_dict[key] = policy_net_state_dict[key] * TAU + target_net_state_dict[key] * (1 - TAU)
-            target_net.load_state_dict(target_net_state_dict)
-
         if done:
             break
 
+        next_state = torch.from_numpy(np.array(next_state)).to(device)
         state = next_state
 
-    for x, transition in reversed(list(enumerate(shooting_transitions))):
-        for idx, hit_missile_id in reversed(list(enumerate(shooting_flags[x]["hit_ids"]))):
-            y = x - 1
-            while y >= 0:
-                if shooting_flags[y]["shoot_id"] == hit_missile_id:
-                    old_reward = shooting_transitions[y][3].item()
-                    new_reward = old_reward + shooting_flags[x]["hit_rewards"][idx]
-                    running_reward += shooting_flags[x]["hit_rewards"][idx]
-                    shooting_transitions[y] = (
-                        shooting_transitions[y][0],
-                        shooting_transitions[y][1],
-                        shooting_transitions[y][2],
-                        torch.tensor([new_reward], device = device)
-                    )
-                y -= 1
-        for idx, miss_missile_id in reversed(list(enumerate(shooting_flags[x]["miss_ids"]))):
-            y = x - 1
-            while y >= 0:
-                if shooting_flags[y]["shoot_id"] == miss_missile_id:
-                    old_reward = shooting_transitions[y][3].item()
-                    new_reward = old_reward + shooting_flags[x]["miss_rewards"][idx]
-                    running_reward += shooting_flags[x]["miss_rewards"][idx]
-                    shooting_transitions[y] = (
-                        shooting_transitions[y][0],
-                        shooting_transitions[y][1],
-                        shooting_transitions[y][2],
-                        torch.tensor([new_reward], device = device)
-                    )
-                y -= 1
-        memory.add(TensorDict({"state": transition[0], "action": transition[1], "next_state": transition[2], "reward": transition[3], "terminated": transition[4]}, batch_size = []))
+        terminated = torch.tensor([terminated], dtype = torch.bool, device = device)
+        memory.add(TensorDict({"state": state, "action": action, "next_state": next_state, "reward": reward, "terminated": terminated}, batch_size = []))
         optimize_model()
-
+    
         target_net_state_dict = target_net.state_dict()
         policy_net_state_dict = policy_net.state_dict()
         for key in policy_net_state_dict:
             target_net_state_dict[key] = policy_net_state_dict[key] * TAU + target_net_state_dict[key] * (1 - TAU)
         target_net.load_state_dict(target_net_state_dict)
 
+        if done:
+            break
+
+        state = next_state
+
     episodes_done += 1
     episode_rewards.append(running_reward)
-
     if (i + 1) % 100 == 0 or (i + 1) == num_episodes:
         torch.save(policy_net.state_dict(), f"./checkpoints/{i:05d}_policy.chkpt")
         torch.save(target_net.state_dict(), f"./checkpoints/{i:05d}_target.chkpt")

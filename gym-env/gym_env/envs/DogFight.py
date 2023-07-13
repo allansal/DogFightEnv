@@ -6,7 +6,7 @@ from typing import Optional, Union
 
 class DogFightEnv(gym.Env):
     metadata = {
-        "render_fps" : 15,
+        "render_fps" : 4,
         "render_modes" : ["human", "rgb_array"]
     }
 
@@ -25,14 +25,14 @@ class DogFightEnv(gym.Env):
         self.screen = None
         self.clock = None
         self.color_white  = (255, 255, 255, 255)
-        self.color_gray   = ( 64,  64,  64, 255)
+        self.color_gray   = ( 32,  32,  32, 255)
         self.color_black  = (  0,   0,   0, 255)
         self.color_clear  = (  0,   0,   0,   0)
-        self.color_green  = (  0, 255,   0, 255)
-        self.color_red    = (255,   0,   0, 255)
+        self.color_green  = (224, 255, 224, 255)
+        self.color_red    = (150, 150, 150, 255)
         self.color_teal   = (  0, 255, 255, 255)
-        self.color_blue   = (  0,   0, 255, 255)
-        self.color_orange = (255, 165,   0, 255)
+        self.color_blue   = (110, 110, 110, 255)
+        self.color_orange = (150, 150, 150, 255)
 
         # Game area settings (for out of bounds checks and other things)
         self.min_x = 0
@@ -51,10 +51,10 @@ class DogFightEnv(gym.Env):
         self.RIGHT    = -1
 
         # Player properties
-        self.player_radius = 20
+        self.player_radius = 35
         # Player min speed: 10 seconds to cross game area
         # Player max speed:  5 seconds to cross game area
-        self.player_min_speed = self.max_x / 10
+        self.player_min_speed = self.max_x /  5
         self.player_max_speed = self.max_x /  5
         # Player min acceleration: 0.25 seconds from max to min speed
         # Player max acceleration: 2.50 seconds from min to max speed
@@ -75,14 +75,14 @@ class DogFightEnv(gym.Env):
         # Player missile properties
         # Track the missiles for properly assigning delayed rewards outside env
         self.player_missile_id_counter = 0
-        self.player_missile_radius = 6
+        self.player_missile_radius = 8
         self.player_missile_speed = 2.0 * self.player_max_speed
         self.player_missile_range = 3 * self.player_observation_range
         # Bounds of player missile's random angle offset
         self.player_missile_angle_offset = 0.04
 
         # Enemy properties
-        self.enemy_radius = 20
+        self.enemy_radius = 35
         # Enemy is 0.8 x player speed
         self.enemy_min_speed = 0.80 * self.player_min_speed
         self.enemy_max_speed = 0.80 * self.player_max_speed
@@ -104,7 +104,7 @@ class DogFightEnv(gym.Env):
         self.enemy_firing_fov = 0.35
 
         # Enemy missile properties
-        self.enemy_missile_radius = 6
+        self.enemy_missile_radius = 8
         self.enemy_missile_speed = 0.5 * self.player_missile_speed
         self.enemy_missile_range = 3 * self.enemy_observation_range
         # Bounds of enemy missile's random angle offset
@@ -124,58 +124,12 @@ class DogFightEnv(gym.Env):
         self.reward_time_penalty = -self.tau
         self.reward_approach_target = abs(self.reward_time_penalty)
 
-        # Environment observation space:
-        #  0.) Jet absolute x position
-        #  1.) Jet absolute y position
-        #  2.) Target relative x position
-        #  3.) Target relative y position
-        #  4.) Target distance from player
-        #  5.) Enemy visibility
-        #  6.) Enemy relative x position
-        #  7.) Enemy relative y position
-        #  8.) Enemy distance from player
-        #  9.) Enemy angle to player
-        # 10.) Enemy bullet visibility
-        # 11.) Enemy bullet relative x position
-        # 12.) Enemy bullet relative y position
-        # 13.) Enemy bullet distance from player
-        # 14.) Enemy bullet angle to player
+        # Pixel observation space
         self.observation_space = gym.spaces.Box(
-            low = np.array([
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-            ]),
-            high = np.array([
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-            ]),
-            dtype = np.float64
+            low = 0,
+            high = 255,
+            shape = (self.screen_size[0], self.screen_size[1], 3),
+            dtype = np.uint8
         )
 
         # Environment action space:
@@ -189,16 +143,6 @@ class DogFightEnv(gym.Env):
 
     # Take a single simulation step in the environment
     def step(self, action):
-        # Additional dictionary to track missile information for assigning
-        # delayed rewards to the proper step (done outside the environment)
-        player_missile_step_info = {
-            "shoot_id"     : None, # the id of the missile shot during this step
-            "hit_ids"      : [],   # the ids of the missiles that hit this step
-            "miss_ids"     : [],   # the ids of the missiles that missed this step
-            "hit_rewards"  : [],   # rewards for the missiles that hit
-            "miss_rewards" : [],   # rewards (penalties) for the missiles that missed
-        }
-
         p_shot_at_nothing = False
         if action == 4:
             if self.player.distance_to(self.target) <= self.target_opening_range:
@@ -219,7 +163,6 @@ class DogFightEnv(gym.Env):
             )
             self.player.angle = new_missile.angle
             self.player.missiles.append(new_missile)
-            player_missile_step_info["shoot_id"] = self.player_missile_id_counter
             self.player_missile_id_counter += 1
         elif action == 5:
             if not self.enemy.dead and self.player.distance_to(self.enemy) <= self.player.observation_range:
@@ -238,7 +181,6 @@ class DogFightEnv(gym.Env):
                 )
                 self.player.angle = new_missile.angle
                 self.player.missiles.append(new_missile)
-                player_missile_step_info["shoot_id"] = self.player_missile_id_counter
                 self.player_missile_id_counter += 1
             else:
                 p_shot_at_nothing = True
@@ -305,29 +247,25 @@ class DogFightEnv(gym.Env):
         # ================================================================================
         # Player Missile Movement & Delayed Reward Handling
         # ================================================================================
-        terminated = False
+        reward, terminated = 0, False
         for missile in self.player.missiles[:]:
             missile.move(self.tau)
             # Missiles going out of bounds are considered a miss
             if not missile.in_area(*(self.world_area)):
-                player_missile_step_info["miss_ids"].append(missile.id)
-                player_missile_step_info["miss_rewards"].append(self.reward_missile_miss)
+                reward += self.reward_missile_miss
                 self.player.missiles.remove(missile)
             # Missiles that reach their maximum range are considered a miss
             elif missile.range < missile.distance_to(missile.origin):
-                player_missile_step_info["miss_ids"].append(missile.id)
-                player_missile_step_info["miss_rewards"].append(self.reward_missile_miss)
+                reward += self.reward_missile_miss
                 self.player.missiles.remove(missile)
             # Missile collides with enemy
             elif not self.enemy.dead and missile.collides_with(self.enemy) and missile.target == self.enemy:
-                player_missile_step_info["hit_ids"].append(missile.id)
-                player_missile_step_info["hit_rewards"].append(self.reward_missile_hit_enemy)
                 self.enemy.dead = True
+                reward += self.reward_missile_hit_enemy
                 self.player.missiles.remove(missile)
             # Missile collides with target (terminating condition)
             elif missile.collides_with(self.target) and missile.fired_in_zone == True and missile.target == self.target:
-                player_missile_step_info["hit_ids"].append(missile.id)
-                player_missile_step_info["hit_rewards"].append(self.reward_missile_hit_target)
+                reward += self.reward_missile_hit_target
                 self.player.missiles.remove(missile)
                 terminated = True
                 break
@@ -336,7 +274,7 @@ class DogFightEnv(gym.Env):
         # ================================================================================
         # Immediate Rewards
         # ================================================================================
-        reward, truncated = 0, False
+        truncated = False
 
         # The player gets hit by an enemy bullet (terminating)
         p_hit_by_missile = False
@@ -369,68 +307,14 @@ class DogFightEnv(gym.Env):
                     reward += 0 * self.reward_time_penalty
         # ================================================================================
 
-        if self.render_mode == "human":
-            self.render()
-
-        # Prepare to return the observations in a normalized manner
-        if self.enemy.dead or self.player.distance_to(self.enemy) > self.player.observation_range:
-            enemy_visible = 0.
-            ex_norm = 0.
-            ey_norm = 0.
-            ed_norm = 0.
-            ea_norm = 0.
-        else:
-            enemy_visible = 1.
-            ex_norm = (self.enemy.x - self.player.x) / self.player.observation_range
-            ey_norm = (self.enemy.y - self.player.y) / self.player.observation_range
-            ed_norm = self.player.distance_to(self.enemy) / self.player_observation_range
-            ea_norm = self.enemy.angle_to(self.player) / np.pi
-        if (
-            self.enemy.missile is not None and
-            self.player.distance_to(self.enemy.missile) <= self.player.observation_range
-        ):
-            enemy_missile_visible = 1.
-            emx_norm = (self.enemy.missile.x - self.player.x) / self.player.observation_range
-            emy_norm = (self.enemy.missile.y - self.player.y) / self.player.observation_range
-            emd_norm = self.player.distance_to(self.enemy.missile) / self.player_observation_range
-            ema_norm = self.enemy.missile.angle_to(self.player) / np.pi
-        else:
-            enemy_missile_visible = 0.
-            emx_norm = 0.
-            emy_norm = 0.
-            emd_norm = 0.
-            ema_norm = 0.
-        px_norm = self.player.x / self.max_x
-        py_norm = self.player.y / self.max_y
-        tx_norm = (self.target.x - self.player.x) / self.max_x
-        ty_norm = (self.target.y - self.player.y) / self.max_y
-        max_d = np.sqrt(self.max_x**2 + self.max_y**2)
-        td_norm = self.player.distance_to(self.target) / max_d
-
-        self.state = (
-            px_norm,
-            py_norm,
-            tx_norm,
-            ty_norm,
-            td_norm,
-            enemy_visible,
-            ex_norm,
-            ey_norm,
-            ed_norm,
-            ea_norm,
-            enemy_missile_visible,
-            emx_norm,
-            emy_norm,
-            emd_norm,
-            ema_norm
-        )
+        self.state = self.render()
 
         # Check if we reached the maximum episode time limit and terminate if so
         self.step_count += 1
         if self.step_count >= self.step_limit:
             truncated = True
 
-        return np.array(self.state, dtype = np.float64), reward, terminated, truncated, player_missile_step_info
+        return np.array(self.state, dtype = np.uint8), reward, terminated, truncated, {}
 
     # Environment reset
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -483,38 +367,11 @@ class DogFightEnv(gym.Env):
             radius = self.target_radius
         )
 
-        # Normalized initial state observation preparation
-        px_norm = self.player.x / self.max_x
-        py_norm = self.player.y / self.max_y
-        tx_norm = (self.target.x - self.player.x) / self.max_x
-        ty_norm = (self.target.y - self.player.y) / self.max_y
-        max_d = np.sqrt(self.max_x**2 + self.max_y**2)
-        td_norm = self.player.distance_to(self.target) / max_d
-
-        self.state = (
-            px_norm,
-            py_norm,
-            tx_norm,
-            ty_norm,
-            td_norm,
-            0.,
-            0.,
-            0.,
-            0.,
-            0.,
-            0.,
-            0.,
-            0.,
-            0.,
-            0.,
-        )
-
         self.player_last_dist = self.player.distance_to(self.target)
 
-        if self.render_mode == "human":
-            self.render()
+        self.state = self.render()
 
-        return np.array(self.state, dtype = np.float64), {}
+        return np.array(self.state, dtype = np.uint8), {}
 
     def _get_jet_vertices(self, jet):
         jet_vertices = [
@@ -538,28 +395,21 @@ class DogFightEnv(gym.Env):
     # transparent shape, or else they will not blend together properly
     # when blitted to the lower surface or directly to the screen
     def render(self):
-        if self.render_mode is None:
-            gym.logger.warn(
-                "Env render method called without specified render mode"
-            )
-            return
-
         # Initialize screen with PyGame
         if self.screen is None:
             pygame.init()
             if self.render_mode == "human":
                 pygame.display.init()
                 self.screen = pygame.display.set_mode(self.screen_size)
+                self.clock = pygame.time.Clock()
             else:
                 self.screen = pygame.Surface(self.screen_size)
             self.lower_surface = pygame.Surface(self.screen_size)
-            self.lower_surface = pygame.transform.flip(self.lower_surface, flip_x = True, flip_y = False)
+#            self.lower_surface = pygame.transform.flip(self.lower_surface, flip_x = True, flip_y = False)
             self.shadow_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
             self.pobs_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
             self.zone_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
             self.tghost_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
-        if self.clock is None:
-            self.clock = pygame.time.Clock()
 
         # Reset / clear the surfaces each frame
         self.lower_surface.fill(self.color_black)
@@ -585,12 +435,19 @@ class DogFightEnv(gym.Env):
             self.target.radius
         )
 
-        # Draw the jets
-        for jet in [self.player, self.enemy]:
-            if jet == self.player or (jet == self.enemy and not self.enemy.dead):
-                jet_vertices = self._get_jet_vertices(jet)
-                color = self.color_green if jet is self.player else self.color_red
-                pygame.draw.polygon(self.lower_surface, color, jet_vertices)
+#        # Draw the jets
+#        for jet in [self.player, self.enemy]:
+#            if jet == self.player or (jet == self.enemy and not self.enemy.dead):
+#                jet_vertices = self._get_jet_vertices(jet)
+#                color = self.color_green if jet is self.player else self.color_red
+#                pygame.draw.polygon(self.lower_surface, color, jet_vertices)
+
+        player_verts = self._get_jet_vertices(self.player)
+        pygame.draw.polygon(self.lower_surface, self.color_green, player_verts)
+        if not self.enemy.dead:
+            rect = pygame.Rect(0, 0, self.enemy_radius, self.enemy_radius)
+            rect.center = (self.enemy.x, self.enemy.y)
+            pygame.draw.rect(self.lower_surface, self.color_red, rect)
 
         # Draw enemy missile
         if self.enemy.missile is not None:
@@ -617,6 +474,9 @@ class DogFightEnv(gym.Env):
                 missile.radius
             )
 
+#        return_surface = pygame.transform.smoothscale(self.lower_surface, (0.125 * self.screen_size[0], 0.125 * self.screen_size[1]))
+#        return_surface = pygame.transform.grayscale(return_surface)
+#        pygame.image.save(return_surface, f"./images/frame_{self.step_count:03d}.jpeg")
         self.screen.blit(self.lower_surface, (0, 0))
 
         # PyGame event handling and timing
@@ -624,6 +484,9 @@ class DogFightEnv(gym.Env):
             pygame.event.pump()
             pygame.display.flip()
             self.clock.tick(self.metadata["render_fps"])
+
+        arr = pygame.surfarray.array3d(self.lower_surface)
+        return arr
 
     # Close the environment
     def close(self):
