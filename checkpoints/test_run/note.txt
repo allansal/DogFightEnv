@@ -1,0 +1,5 @@
+Episode 1250:
+Shoots enemy consistently, attempts missile avoidance (varying success)
+Shoots target often when in range (doesn't always find way though)
+
+--memory-size 250000 --batch-size 128

@@ -94,7 +94,7 @@ def main():
     eps_min = args.eps_min
     eps_max = args.eps_max
     eps_decay = (eps_min / eps_max) ** (1. / (num_episodes - start))
-    for i in range(start, num_episodes):
+    while i < num_episodes:
         state, info = env.reset()
         state = torch.tensor(state, device = device, dtype = torch.float32).unsqueeze(0)
         running_reward = 0
@@ -120,26 +120,25 @@ def main():
             done = terminated or truncated
             terminated = torch.tensor([terminated], device = device, dtype = torch.bool)
 
-            if not args.evaluate:
-                transition = TensorDict(
-                    {
-                        "state"      : state,
-                        "action"     : action,
-                        "next_state" : next_state,
-                        "reward"     : reward,
-                        "terminated" : terminated
-                    },
-                    batch_size = []
-                )
+            transition = TensorDict(
+                {
+                    "state"      : state,
+                    "action"     : action,
+                    "next_state" : next_state,
+                    "reward"     : reward,
+                    "terminated" : terminated
+                },
+                batch_size = []
+            )
 
-                if info["shoot_act"]:
-                    shooting_transitions.append(transition)
-                    shooting_flags.append(info)
-                else:
-                    memory.add(transition)
-                    if j >= args.exploration_episodes:
-                        optimize_model(policy_net, target_net, optimizer, args.gamma, memory)
-                        update_target(policy_net, target_net, args.tau)
+            if info["shoot_act"]:
+                shooting_transitions.append(transition)
+                shooting_flags.append(info)
+            elif not args.evaluate:
+                memory.add(transition)
+                if j >= args.exploration_episodes:
+                    optimize_model(policy_net, target_net, optimizer, args.gamma, memory)
+                    update_target(policy_net, target_net, args.tau)
 
             if done:
                 break
@@ -165,14 +164,13 @@ def main():
                         running_reward += shooting_flags[x]["miss_rewards"][idx]
                         shooting_transitions[y]["reward"] = torch.tensor([new_reward], device = device)
                     y -= 1
-            memory.add(transition)
-            optimize_model(policy_net, target_net, optimizer, args.gamma, memory)
-            update_target(policy_net, target_net, args.tau)
+            if not args.evaluate:
+                memory.add(transition)
+                if j >= args.exploration_episodes:
+                    optimize_model(policy_net, target_net, optimizer, args.gamma, memory)
+                    update_target(policy_net, target_net, args.tau)
 
         print(f"Episode {i:6d} ended, reward: {running_reward}")
-        if j >= args.exploration_episodes:
-            i += 1
-        j += 1
         if not args.evaluate:
             episode_rewards.append(running_reward)
             if ((i - start + 1) % args.checkpoint_interval) == 0 or i + 1 == num_episodes:
@@ -201,6 +199,10 @@ def main():
                 plt.savefig(f"{base_dir}/{subdir}/{i + 1}_plot.png")
                 print(f"Saved reward plot checkpoint: {base_dir}/{subdir}/{i + 1}_plot.png")
         print("--------------------------------------------------------------------------------")
+
+        if j >= args.exploration_episodes:
+            i += 1
+        j += 1
 
 def update_target(policy_net, target_net, tau):
     target_net_state_dict = target_net.state_dict()

@@ -76,7 +76,7 @@ class DogFightEnv(gym.Env):
         # Track the missiles for properly assigning delayed rewards outside env
         self.player_missile_id_counter = 0
         self.player_missile_radius = 3
-        self.player_missile_speed = 2.0 * self.player_max_speed
+        self.player_missile_speed = 3.0 * self.player_max_speed
         self.player_missile_range = 3 * self.player_observation_range
         # Bounds of player missile's random angle offset
         self.player_missile_angle_offset = 0.04
@@ -105,7 +105,7 @@ class DogFightEnv(gym.Env):
 
         # Enemy missile properties
         self.enemy_missile_radius = 3
-        self.enemy_missile_speed = 0.5 * self.player_missile_speed
+        self.enemy_missile_speed = 0.250 * self.player_missile_speed
         self.enemy_missile_range = 3 * self.enemy_observation_range
         # Bounds of enemy missile's random angle offset
         self.enemy_missile_angle_offset = 0.04
@@ -367,13 +367,6 @@ class DogFightEnv(gym.Env):
             if dist_to_target < self.player_last_dist:
                 reward += self.reward_approach_target
             self.player_last_dist = dist_to_target
-            # No collision occurred, but check if the player gets too close to enemy
-            if not self.enemy.dead:
-                distance_to_player = self.enemy.distance_to(self.player)
-                if distance_to_player <= 0.50 * self.enemy.observation_range:
-                    reward += 0 * self.reward_time_penalty
-                elif distance_to_player <= self.enemy_observation_range:
-                    reward += 0 * self.reward_time_penalty
         # ================================================================================
 
         if self.render_mode == "human":
