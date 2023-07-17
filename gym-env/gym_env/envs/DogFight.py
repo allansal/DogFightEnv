@@ -51,7 +51,7 @@ class DogFightEnv(gym.Env):
         self.RIGHT    = -1
 
         # Player properties
-        self.player_radius = 20
+        self.player_radius = 10
         # Player min speed: 10 seconds to cross game area
         # Player max speed:  5 seconds to cross game area
         self.player_min_speed = self.max_x / 10
@@ -75,14 +75,14 @@ class DogFightEnv(gym.Env):
         # Player missile properties
         # Track the missiles for properly assigning delayed rewards outside env
         self.player_missile_id_counter = 0
-        self.player_missile_radius = 6
+        self.player_missile_radius = 3
         self.player_missile_speed = 2.0 * self.player_max_speed
         self.player_missile_range = 3 * self.player_observation_range
         # Bounds of player missile's random angle offset
         self.player_missile_angle_offset = 0.04
 
         # Enemy properties
-        self.enemy_radius = 20
+        self.enemy_radius = 10
         # Enemy is 0.8 x player speed
         self.enemy_min_speed = 0.80 * self.player_min_speed
         self.enemy_max_speed = 0.80 * self.player_max_speed
@@ -104,7 +104,7 @@ class DogFightEnv(gym.Env):
         self.enemy_firing_fov = 0.35
 
         # Enemy missile properties
-        self.enemy_missile_radius = 6
+        self.enemy_missile_radius = 3
         self.enemy_missile_speed = 0.5 * self.player_missile_speed
         self.enemy_missile_range = 3 * self.enemy_observation_range
         # Bounds of enemy missile's random angle offset
@@ -192,11 +192,12 @@ class DogFightEnv(gym.Env):
         # Additional dictionary to track missile information for assigning
         # delayed rewards to the proper step (done outside the environment)
         player_missile_step_info = {
-            "shoot_id"     : None, # the id of the missile shot during this step
-            "hit_ids"      : [],   # the ids of the missiles that hit this step
-            "miss_ids"     : [],   # the ids of the missiles that missed this step
-            "hit_rewards"  : [],   # rewards for the missiles that hit
-            "miss_rewards" : [],   # rewards (penalties) for the missiles that missed
+            "shoot_act"    : False, # missile related action this step
+            "shoot_id"     : None,  # the id of the missile shot during this step
+            "hit_ids"      : [],    # the ids of the missiles that hit this step
+            "miss_ids"     : [],    # the ids of the missiles that missed this step
+            "hit_rewards"  : [],    # rewards for the missiles that hit
+            "miss_rewards" : [],    # rewards (penalties) for the missiles that missed
         }
 
         p_shot_at_nothing = False
@@ -220,6 +221,7 @@ class DogFightEnv(gym.Env):
             self.player.angle = new_missile.angle
             self.player.missiles.append(new_missile)
             player_missile_step_info["shoot_id"] = self.player_missile_id_counter
+            player_missile_step_info["shoot_act"] = True
             self.player_missile_id_counter += 1
         elif action == 5:
             if not self.enemy.dead and self.player.distance_to(self.enemy) <= self.player.observation_range:
@@ -239,6 +241,7 @@ class DogFightEnv(gym.Env):
                 self.player.angle = new_missile.angle
                 self.player.missiles.append(new_missile)
                 player_missile_step_info["shoot_id"] = self.player_missile_id_counter
+                player_missile_step_info["shoot_act"] = True
                 self.player_missile_id_counter += 1
             else:
                 p_shot_at_nothing = True
@@ -311,22 +314,26 @@ class DogFightEnv(gym.Env):
             # Missiles going out of bounds are considered a miss
             if not missile.in_area(*(self.world_area)):
                 player_missile_step_info["miss_ids"].append(missile.id)
+                player_missile_step_info["shoot_act"] = True
                 player_missile_step_info["miss_rewards"].append(self.reward_missile_miss)
                 self.player.missiles.remove(missile)
             # Missiles that reach their maximum range are considered a miss
             elif missile.range < missile.distance_to(missile.origin):
                 player_missile_step_info["miss_ids"].append(missile.id)
+                player_missile_step_info["shoot_act"] = True
                 player_missile_step_info["miss_rewards"].append(self.reward_missile_miss)
                 self.player.missiles.remove(missile)
             # Missile collides with enemy
             elif not self.enemy.dead and missile.collides_with(self.enemy) and missile.target == self.enemy:
                 player_missile_step_info["hit_ids"].append(missile.id)
+                player_missile_step_info["shoot_act"] = True
                 player_missile_step_info["hit_rewards"].append(self.reward_missile_hit_enemy)
                 self.enemy.dead = True
                 self.player.missiles.remove(missile)
             # Missile collides with target (terminating condition)
             elif missile.collides_with(self.target) and missile.fired_in_zone == True and missile.target == self.target:
                 player_missile_step_info["hit_ids"].append(missile.id)
+                player_missile_step_info["shoot_act"] = True
                 player_missile_step_info["hit_rewards"].append(self.reward_missile_hit_target)
                 self.player.missiles.remove(missile)
                 terminated = True

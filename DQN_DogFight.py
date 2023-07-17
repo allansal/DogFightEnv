@@ -1,109 +1,216 @@
-import pickle
+import argparse
+import copy
+import datetime
 import gymnasium as gym
-import math
-import matplotlib
 import matplotlib.pyplot as plt
-import random
-import torch
-import numpy as np
+import os
 import pandas as pd
+import pickle
+import random
+import sys
+import torch
 
 import gym_env
 
-from collections import deque, namedtuple
 from itertools import count
 from tensordict import TensorDict
 from torch import nn, optim
 from torchrl.data import TensorDictPrioritizedReplayBuffer, LazyTensorStorage
 
-# Define gym environment
-env = gym.make("gym_env/DogFight")
+def main():
+    base_dir = "./checkpoints"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args = parse_arguments()
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-episodes_done = 0
-
-# Set up DQN network, layer-by-layer
-class DQN(nn.Module):
-    def __init__(self, n_observations, n_actions):
-        super(DQN, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 32)
-        self.layer2 = nn.Linear(32, 32)
-        self.layer3 = nn.Linear(32, 16)
-        self.layer4 = nn.Linear(16, n_actions)
-
-    # Forward pass through NN
-    def forward(self, x):
-        x = nn.functional.relu(self.layer1(x))
-        x = nn.functional.relu(self.layer2(x))
-        x = nn.functional.relu(self.layer3(x))
-        return self.layer4(x)
-
-# Hyper-parameters for RL training
-BATCH_SIZE = 128
-GAMMA = 0.99
-LR = 5e-4
-# Eps-greedy algorithm parameters
-EPS_START = 1.00
-EPS_END = 0.05
-EPS_DECAY = 100
-# Update rate of target network
-TAU = 0.005
-
-# Get possible # of actions from the environment
-n_actions = env.action_space.n
-# Reset env to initial state, get initial observations for agent
-state, info = env.reset()
-# Get the # of observations of the state (size of input layer)
-n_observations = len(state)
-
-# Set up policy & target network w/ proper input and output layer sizes
-# Learning target constantly shifts as parameters of the DQN are updated.
-# This is a problem since it can cause the learning to diverge.
-# Separate target network is used to calc. target Q-value.
-# Target has same structure as policy NN, but parameters are frozen.
-# Target network updated only occasionally to prevent prevent extreme
-# divergence or the agent "forgetting" how to act properly.
-policy_net = DQN(n_observations, n_actions).to(device)
-target_net = DQN(n_observations, n_actions).to(device)
-target_net.load_state_dict(policy_net.state_dict())
-#policy_net.load_state_dict(torch.load("./checkpoints/00999_policy.chkpt"))
-#target_net.load_state_dict(torch.load("./checkpoints/00999_target.chkpt"))
-#policy_net.eval()
-#target_net.eval()
-
-# AdamW optimizer w/ parameters set
-optimizer = optim.AdamW(policy_net.parameters(), lr = LR, amsgrad = True)
-memory = TensorDictPrioritizedReplayBuffer(
-    alpha = 0.65,
-    beta = 0.45,
-    eps = 1e-6,
-    storage = LazyTensorStorage(
-        max_size = 125 * 60 * env.metadata["render_fps"],
-        device = device
-    ),
-    batch_size = BATCH_SIZE,
-    pin_memory = False
-)
-#memory.load_state_dict(torch.load("./checkpoints/00999_memory.chkpt"))
-
-# Steps done for eps-greedy algorithm
-# As steps grow, make it less likely to choose actions randomly
-def select_action(state):
-    sample = random.random()
-    eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * episodes_done / EPS_DECAY)
-    if eps_threshold < sample:
-        with torch.no_grad():
-            return policy_net(state).max(1)[1].view(1, 1)
+    # Create checkpoints folder if it doesn't exist
+    if not os.path.exists(base_dir):
+        os.makedirs(base_dir)
+    if not args.checkpoint_dir:
+        subdir = datetime.datetime.now().strftime("%m%d%H%M%S")
     else:
-        return torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
+        subdir = args.checkpoint_dir
+    os.makedirs(f"{base_dir}/{subdir}", exist_ok = True)
+    print(f"Created checkpoint directory: {base_dir}/{subdir}")
 
-# Track the durations through the episodes of cartpole, high is better (basically track performance for this environment)
-episode_durations = []
+    # Define gym environment
+    render_mode = "human" if args.render else None
+    env = gym.make("gym_env/DogFight", render_mode = render_mode)
 
-# Optimization
-def optimize_model():
-    if len(memory) < BATCH_SIZE:
+    state, info = env.reset()
+    n_actions = env.action_space.n
+    n_observations = len(state)
+
+    # Set up DQN network
+    policy_net = nn.Sequential(
+        nn.Linear(n_observations, 256),
+        nn.ReLU(),
+        nn.Linear(256, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, 32),
+        nn.ReLU(),
+        nn.Linear(32, n_actions),
+    ).to(device)
+    target_net = copy.deepcopy(policy_net)
+
+    # Prioritized experience replay memory buffer
+    memory = TensorDictPrioritizedReplayBuffer(
+        alpha = args.per_alpha,
+        beta = args.per_beta,
+        eps = args.per_eps,
+        storage = LazyTensorStorage(
+            max_size = args.memory_size,
+            device = device
+        ),
+        batch_size = args.batch_size,
+        pin_memory = True if torch.cuda.is_available() else False
+    )
+
+    start = 0
+    num_episodes = args.num_episodes
+    episode_rewards = []
+    if args.load_checkpoint is not None:
+        checkpoint = args.load_checkpoint
+        policy_net.load_state_dict(torch.load(f"{base_dir}/{subdir}/{checkpoint}_policy.pt"))
+        print(f"Loaded policy_net checkpoint:  {base_dir}/{subdir}/{checkpoint}_policy.pt")
+        target_net.load_state_dict(torch.load(f"{base_dir}/{subdir}/{checkpoint}_target.pt"))
+        print(f"Loaded target_net checkpoint:  {base_dir}/{subdir}/{checkpoint}_target.pt")
+        memory.load_state_dict(torch.load(f"{base_dir}/{subdir}/{checkpoint}_memory.pt"))
+        print(f"Loaded memory checkpoint:      {base_dir}/{subdir}/{checkpoint}_memory.pt")
+        with open(f"{base_dir}/{subdir}/{checkpoint}_rewards", "rb") as file:
+            episode_rewards = pickle.load(file)
+            print(f"Loaded reward list checkpoint: {base_dir}/{subdir}/{checkpoint}_rewards")
+        start = checkpoint
+        num_episodes += checkpoint
+    if args.evaluate:
+        policy_net.eval()
+        target_net.eval()
+
+    optimizer = optim.AdamW(policy_net.parameters(), lr = args.lr, amsgrad = True)
+
+    i = start
+    j = 0
+    eps_min = args.eps_min
+    eps_max = args.eps_max
+    eps_decay = (eps_min / eps_max) ** (1. / (num_episodes - start))
+    for i in range(start, num_episodes):
+        state, info = env.reset()
+        state = torch.tensor(state, device = device, dtype = torch.float32).unsqueeze(0)
+        running_reward = 0
+        eps = max(args.eps_min, eps_max * eps_decay ** i)
+        print("--------------------------------------------------------------------------------")
+        print(f"Episode {i:6d} started, epsilon: {eps}")
+
+        shooting_transitions = []
+        shooting_flags = []
+        for t in count():
+            # Epsilon greedy
+            sample = random.random()
+            if args.evaluate or sample > eps:
+                with torch.no_grad():
+                    action = policy_net(state).max(dim = 1)[1]
+            else:
+                action = torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
+
+            next_state, reward, terminated, truncated, info = env.step(action.item())
+            running_reward += reward
+            reward = torch.tensor([reward], device = device)
+            next_state = torch.tensor(next_state, device = device, dtype = torch.float32).unsqueeze(0)
+            done = terminated or truncated
+            terminated = torch.tensor([terminated], device = device, dtype = torch.bool)
+
+            if not args.evaluate:
+                transition = TensorDict(
+                    {
+                        "state"      : state,
+                        "action"     : action,
+                        "next_state" : next_state,
+                        "reward"     : reward,
+                        "terminated" : terminated
+                    },
+                    batch_size = []
+                )
+
+                if info["shoot_act"]:
+                    shooting_transitions.append(transition)
+                    shooting_flags.append(info)
+                else:
+                    memory.add(transition)
+                    if j >= args.exploration_episodes:
+                        optimize_model(policy_net, target_net, optimizer, args.gamma, memory)
+                        update_target(policy_net, target_net, args.tau)
+
+            if done:
+                break
+
+            state = next_state
+
+        for x, transition in reversed(list(enumerate(shooting_transitions))):
+            for idx, hit_missile_id in reversed(list(enumerate(shooting_flags[x]["hit_ids"]))):
+                y = x - 1
+                while y >= 0:
+                    if shooting_flags[y]["shoot_id"] == hit_missile_id:
+                        old_reward = shooting_transitions[y]["reward"].item()
+                        new_reward = old_reward + shooting_flags[x]["hit_rewards"][idx]
+                        running_reward += shooting_flags[x]["hit_rewards"][idx]
+                        shooting_transitions[y]["reward"] = torch.tensor([new_reward], device = device)
+                    y -= 1
+            for idx, miss_missile_id in reversed(list(enumerate(shooting_flags[x]["miss_ids"]))):
+                y = x - 1
+                while y >= 0:
+                    if shooting_flags[y]["shoot_id"] == miss_missile_id:
+                        old_reward = shooting_transitions[y]["reward"].item()
+                        new_reward = old_reward + shooting_flags[x]["miss_rewards"][idx]
+                        running_reward += shooting_flags[x]["miss_rewards"][idx]
+                        shooting_transitions[y]["reward"] = torch.tensor([new_reward], device = device)
+                    y -= 1
+            memory.add(transition)
+            optimize_model(policy_net, target_net, optimizer, args.gamma, memory)
+            update_target(policy_net, target_net, args.tau)
+
+        print(f"Episode {i:6d} ended, reward: {running_reward}")
+        if j >= args.exploration_episodes:
+            i += 1
+        j += 1
+        if not args.evaluate:
+            episode_rewards.append(running_reward)
+            if ((i - start + 1) % args.checkpoint_interval) == 0 or i + 1 == num_episodes:
+                torch.save(policy_net.state_dict(), f"{base_dir}/{subdir}/{i + 1}_policy.pt")
+                print(f"Saved policy_net checkpoint:  {base_dir}/{subdir}/{i + 1}_policy.pt")
+                torch.save(target_net.state_dict(), f"{base_dir}/{subdir}/{i + 1}_target.pt")
+                print(f"Saved target_net checkpoint:  {base_dir}/{subdir}/{i + 1}_target.pt")
+                torch.save(memory.state_dict(), f"{base_dir}/{subdir}/{i + 1}_memory.pt")
+                print(f"Saved memory checkpoint:      {base_dir}/{subdir}/{i + 1}_memory.pt")
+                with open(f"{base_dir}/{subdir}/{i + 1}_rewards", "wb") as file:
+                    pickle.dump(episode_rewards, file)
+                    print(f"Saved reward list checkpoint: {base_dir}/{subdir}/{i + 1}_rewards")
+                with open(f"{base_dir}/{subdir}/{i + 1}_parameters", "wb") as file:
+                    pickle.dump(args, file)
+                    print(f"Saved argument checkpoint:    {base_dir}/{subdir}/{i + 1}_arguments")
+
+                s = pd.Series(episode_rewards)
+                sma = s.rolling(10).mean()
+                fig, ax = plt.subplots()
+                ax.plot(s, label = "Rewards (Raw)")
+                ax.plot(sma, label = "Rewards (Moving Average)")
+                ax.legend()
+                plt.xlabel("Episode Number")
+                plt.ylabel("Episode Reward")
+                plt.title("RL Agent Reward Across Training Episodes")
+                plt.savefig(f"{base_dir}/{subdir}/{i + 1}_plot.png")
+                print(f"Saved reward plot checkpoint: {base_dir}/{subdir}/{i + 1}_plot.png")
+        print("--------------------------------------------------------------------------------")
+
+def update_target(policy_net, target_net, tau):
+    target_net_state_dict = target_net.state_dict()
+    policy_net_state_dict = policy_net.state_dict()
+    for key in policy_net_state_dict:
+        target_net_state_dict[key] = policy_net_state_dict[key] * tau + target_net_state_dict[key] * (1 - tau)
+    target_net.load_state_dict(target_net_state_dict)
+
+def optimize_model(policy_net, target_net, optimizer, gamma, memory):
+    if len(memory) < memory._batch_size:
         return
 
     batch = memory.sample()
@@ -115,11 +222,10 @@ def optimize_model():
     terminations = torch.cat([s for s in batch["terminated"]])
 
     state_action_values = policy_net(states).gather(1, actions)
-
     with torch.no_grad():
         next_state_values = target_net(next_states).max(1)[0]
 
-    expected_state_action_values = rewards + (1. - terminations.float()) * GAMMA * next_state_values
+    expected_state_action_values = rewards + (1. - terminations.float()) * gamma * next_state_values
 
     criterion = nn.MSELoss(reduction = "none")
     td_errors = criterion(state_action_values.float(), expected_state_action_values.unsqueeze(1).float())
@@ -135,114 +241,29 @@ def optimize_model():
     batch.set("td_error", td_errors)
     memory.update_tensordict_priority(batch)
 
-num_episodes = 1000
-episode_rewards = []
-# Train for the desired # of episodes
-i = 0
-for i in range(num_episodes):
-    ep_step_count = 0
-    # Get initial state of episode
-    state, info = env.reset()
-    state = torch.tensor(state, dtype = torch.float32, device = device).unsqueeze(0)
-    shooting_transitions = []
-    shooting_flags = []
-    running_reward = 0
-    # Continue until termination
-    for t in count():
-        # Select action
-        action = select_action(state)
-        # Get observation, reward, whether we fail or not
-        next_state, reward, terminated, truncated, info = env.step(action.item())
-        running_reward += reward
-        ep_step_count += 1
-        reward = torch.tensor([reward], device = device)
-        done = terminated or truncated
+def parse_arguments():
+    parser = argparse.ArgumentParser(description = "Train and evaluate DQN agent for custom DogFight environment")
 
-        next_state = torch.tensor(next_state, dtype = torch.float32, device = device).unsqueeze(0)
+    parser.add_argument("--render", action = "store_true", help = "Draw the environment state to a window")
+    parser.add_argument("--evaluate", action = "store_true", help = "Run the agent in evaluation mode")
+    parser.add_argument("--checkpoint-dir", type = str, default = None, help = "Directory to load / save checkpoints")
+    parser.add_argument("--load-checkpoint", type = int, default = None, help = "Checkpoint number to load")
+    parser.add_argument("--checkpoint-interval", type = int, default = 100, help = "Episodic interval for checkpoint saving")
+    parser.add_argument("--exploration-episodes", type = int, default = 250, help = "Number of pure exploration episodes")
+    parser.add_argument("--num-episodes", type = int, default = 1000, help = "Number of training or evaluation episodes")
+    parser.add_argument("--lr", type = float, default = 1e-4, help = "Learning rate")
+    parser.add_argument("--gamma", type = float, default = 0.99, help = "Discount factor for future rewards")
+    parser.add_argument("--eps-max", type = float, default = 1.00, help = "Epsilon start value")
+    parser.add_argument("--eps-min", type = float, default = 0.03, help = "Epsilon end value")
+    parser.add_argument("--memory-size", type = int, default = 1e6, help = "Size of replay buffer")
+    parser.add_argument("--batch-size", type = int, default = 256, help = "Replay buffer sample batch size")
+    parser.add_argument("--per-alpha", type = float, default = 0.65, help = "PER (prioritized experience replay) alpha value")
+    parser.add_argument("--per-beta", type = float, default = 0.45, help = "PER (prioritized experience replay) beta value")
+    parser.add_argument("--per-eps", type = float, default = 1e-6, help = "PER (prioritized experience replay) epsilon value")
+    parser.add_argument("--tau", type = float, default = 0.005, help = "Soft-update rate between target and policy networks")
 
-        terminated = torch.tensor([terminated], dtype = torch.bool, device = device)
-        # Add experience to local memory if it is a shooting state
-        # otherwise push to the global memory
-        if (
-            (info["shoot_id"] is not None) or
-            (len(info["hit_ids"]) > 0) or
-            (len(info["miss_ids"]) > 0)
-        ):
-            shooting_transitions.append((state, action, next_state, reward, terminated))
-            shooting_flags.append(info)
-        else:
-            memory.add(TensorDict({"state": state, "action": action, "next_state": next_state, "reward": reward, "terminated": terminated}, batch_size = []))
-            optimize_model()
-    
-            target_net_state_dict = target_net.state_dict()
-            policy_net_state_dict = policy_net.state_dict()
-            for key in policy_net_state_dict:
-                target_net_state_dict[key] = policy_net_state_dict[key] * TAU + target_net_state_dict[key] * (1 - TAU)
-            target_net.load_state_dict(target_net_state_dict)
+    args = parser.parse_args()
+    return args
 
-        if done:
-            break
-
-        state = next_state
-
-    for x, transition in reversed(list(enumerate(shooting_transitions))):
-        for idx, hit_missile_id in reversed(list(enumerate(shooting_flags[x]["hit_ids"]))):
-            y = x - 1
-            while y >= 0:
-                if shooting_flags[y]["shoot_id"] == hit_missile_id:
-                    old_reward = shooting_transitions[y][3].item()
-                    new_reward = old_reward + shooting_flags[x]["hit_rewards"][idx]
-                    running_reward += shooting_flags[x]["hit_rewards"][idx]
-                    shooting_transitions[y] = (
-                        shooting_transitions[y][0],
-                        shooting_transitions[y][1],
-                        shooting_transitions[y][2],
-                        torch.tensor([new_reward], device = device)
-                    )
-                y -= 1
-        for idx, miss_missile_id in reversed(list(enumerate(shooting_flags[x]["miss_ids"]))):
-            y = x - 1
-            while y >= 0:
-                if shooting_flags[y]["shoot_id"] == miss_missile_id:
-                    old_reward = shooting_transitions[y][3].item()
-                    new_reward = old_reward + shooting_flags[x]["miss_rewards"][idx]
-                    running_reward += shooting_flags[x]["miss_rewards"][idx]
-                    shooting_transitions[y] = (
-                        shooting_transitions[y][0],
-                        shooting_transitions[y][1],
-                        shooting_transitions[y][2],
-                        torch.tensor([new_reward], device = device)
-                    )
-                y -= 1
-        memory.add(TensorDict({"state": transition[0], "action": transition[1], "next_state": transition[2], "reward": transition[3], "terminated": transition[4]}, batch_size = []))
-        optimize_model()
-
-        target_net_state_dict = target_net.state_dict()
-        policy_net_state_dict = policy_net.state_dict()
-        for key in policy_net_state_dict:
-            target_net_state_dict[key] = policy_net_state_dict[key] * TAU + target_net_state_dict[key] * (1 - TAU)
-        target_net.load_state_dict(target_net_state_dict)
-
-    episodes_done += 1
-    episode_rewards.append(running_reward)
-
-    if (i + 1) % 100 == 0 or (i + 1) == num_episodes:
-        torch.save(policy_net.state_dict(), f"./checkpoints/{i:05d}_policy.chkpt")
-        torch.save(target_net.state_dict(), f"./checkpoints/{i:05d}_target.chkpt")
-        torch.save(memory.state_dict(), f"./checkpoints/{i:05d}_memory.chkpt")
-
-    print(f"Episode {i:5d} ended, reward: {running_reward}")
-
-s = pd.Series(episode_rewards)
-s_ma = s.rolling(10).mean()
-print("Complete")
-fig, ax = plt.subplots()
-ax.plot(s, label = "Raw Rewards")
-ax.plot(s_ma, label = "Rewards (moving average)")
-ax.legend()
-plt.xlabel("Episode Number")
-plt.ylabel("Episode Reward")
-plt.title("RL Reward Across Training Episodes")
-plt.savefig("./episode_reward_plot.png")
-print(f"Average reward: {sum(episode_rewards) / len(episode_rewards)}")
-print(f"Max reward during Episode {episode_rewards.index(max(episode_rewards))}: {max(episode_rewards)}")
+if __name__ == "__main__":
+    sys.exit(main())
