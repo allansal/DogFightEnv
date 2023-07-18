@@ -17,6 +17,33 @@ from tensordict import TensorDict
 from torch import nn, optim
 from torchrl.data import TensorDictPrioritizedReplayBuffer, LazyTensorStorage
 
+# Q-value decomposed DQN
+class DecompDQN(nn.Module):
+    def __init__(self, n_observations, n_actions, n_reward_components):
+        super(DecompDQN, self).__init__()
+        self.trunk = nn.Sequential(
+            nn.Linear(n_observations, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU()
+        )
+
+        self.branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(32, 16),
+                nn.ReLU(),
+                nn.Linear(16, n_actions)
+            ) for _ in range(n_reward_components)
+        ])
+
+    def forward(self, x):
+        x = self.trunk(x)
+        return [branch(x) for branch in self.branches]
+
 def main():
     base_dir = "./checkpoints"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,20 +66,14 @@ def main():
     state, info = env.reset()
     n_actions = env.action_space.n
     n_observations = len(state)
+    n_reward_components = len(info["dreward"])
 
     # Set up DQN network
-    policy_net = nn.Sequential(
-        nn.Linear(n_observations, 256),
-        nn.ReLU(),
-        nn.Linear(256, 128),
-        nn.ReLU(),
-        nn.Linear(128, 64),
-        nn.ReLU(),
-        nn.Linear(64, 32),
-        nn.ReLU(),
-        nn.Linear(32, n_actions),
-    ).to(device)
-    target_net = copy.deepcopy(policy_net)
+    policy_net = DecompDQN(n_observations, n_actions, n_reward_components)
+    target_net = DecompDQN(n_observations, n_actions, n_reward_components)
+    target_net.load_state_dict(policy_net.state_dict())
+    policy_net.to(device)
+    target_net.to(device)
 
     # Prioritized experience replay memory buffer
     memory = TensorDictPrioritizedReplayBuffer(
@@ -109,13 +130,14 @@ def main():
             sample = random.random()
             if args.evaluate or sample > eps:
                 with torch.no_grad():
-                    action = policy_net(state).max(dim = 1)[1]
+                    action = sum(policy_net(state)).max(dim = 1)[1].view(1, 1)
             else:
                 action = torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
 
             next_state, reward, terminated, truncated, info = env.step(action.item())
             running_reward += reward
-            reward = torch.tensor([reward], device = device)
+            dreward = info["dreward"]
+            dreward = torch.tensor([dreward], device = device)
             next_state = torch.tensor(next_state, device = device, dtype = torch.float32).unsqueeze(0)
             done = terminated or truncated
             terminated = torch.tensor([terminated], device = device, dtype = torch.bool)
@@ -125,7 +147,7 @@ def main():
                     "state"      : state,
                     "action"     : action,
                     "next_state" : next_state,
-                    "reward"     : reward,
+                    "dreward"    : dreward,
                     "terminated" : terminated
                 },
                 batch_size = []
@@ -137,7 +159,7 @@ def main():
             elif not args.evaluate:
                 memory.add(transition)
                 if j >= args.exploration_episodes:
-                    optimize_model(policy_net, target_net, optimizer, args.gamma, memory)
+                    optimize_model(policy_net, target_net, optimizer, args.gamma, memory, n_reward_components)
                     update_target(policy_net, target_net, args.tau)
 
             if done:
@@ -150,24 +172,24 @@ def main():
                 y = x - 1
                 while y >= 0:
                     if shooting_flags[y]["shoot_id"] == hit_missile_id:
-                        old_reward = shooting_transitions[y]["reward"].item()
-                        new_reward = old_reward + shooting_flags[x]["hit_rewards"][idx]
-                        running_reward += shooting_flags[x]["hit_rewards"][idx]
-                        shooting_transitions[y]["reward"] = torch.tensor([new_reward], device = device)
+                        new_reward = torch.tensor(shooting_flags[x]["hit_rewards"][idx], device = device)
+                        ind = shooting_flags[x]["dhit_ind"][idx]
+                        shooting_transitions[y]["dreward"][0, ind] = new_reward
+                        running_reward += new_reward.item()
                     y -= 1
             for idx, miss_missile_id in reversed(list(enumerate(shooting_flags[x]["miss_ids"]))):
                 y = x - 1
                 while y >= 0:
                     if shooting_flags[y]["shoot_id"] == miss_missile_id:
-                        old_reward = shooting_transitions[y]["reward"].item()
-                        new_reward = old_reward + shooting_flags[x]["miss_rewards"][idx]
-                        running_reward += shooting_flags[x]["miss_rewards"][idx]
-                        shooting_transitions[y]["reward"] = torch.tensor([new_reward], device = device)
+                        new_reward = torch.tensor(shooting_flags[x]["miss_rewards"][idx], device = device)
+                        ind = shooting_flags[x]["dmis_ind"][idx]
+                        shooting_transitions[y]["dreward"][0, ind] = new_reward
+                        running_reward += new_reward.item()
                     y -= 1
             if not args.evaluate:
                 memory.add(transition)
                 if j >= args.exploration_episodes:
-                    optimize_model(policy_net, target_net, optimizer, args.gamma, memory)
+                    optimize_model(policy_net, target_net, optimizer, args.gamma, memory, n_reward_components)
                     update_target(policy_net, target_net, args.tau)
 
         print(f"Episode {i:6d} ended, reward: {running_reward}")
@@ -211,36 +233,38 @@ def update_target(policy_net, target_net, tau):
         target_net_state_dict[key] = policy_net_state_dict[key] * tau + target_net_state_dict[key] * (1 - tau)
     target_net.load_state_dict(target_net_state_dict)
 
-def optimize_model(policy_net, target_net, optimizer, gamma, memory):
+def optimize_model(policy_net, target_net, optimizer, gamma, memory, nrcmp):
     if len(memory) < memory._batch_size:
         return
 
     batch = memory.sample()
-    states, actions, next_states, rewards, terminations = (batch.get(key) for key in ("state", "action", "next_state", "reward", "terminated"))
+    states, actions, next_states, drewards, terminations = (batch.get(key) for key in ("state", "action", "next_state", "dreward", "terminated"))
     states = torch.cat([s for s in batch["state"]])
     actions = torch.cat([s for s in batch["action"]])
     next_states = torch.cat([s for s in batch["next_state"]])
-    rewards = torch.cat([s for s in batch["reward"]])
+    drewards = torch.cat([s for s in batch["dreward"]])
     terminations = torch.cat([s for s in batch["terminated"]])
 
-    state_action_values = policy_net(states).gather(1, actions)
+    state_action_values = torch.stack([policy_net(states)[i].gather(1, actions) for i in range(nrcmp)])
     with torch.no_grad():
-        next_state_values = target_net(next_states).max(1)[0]
+        next_state_values = torch.stack([target_net(next_states)[i].max(1)[0] for i in range(nrcmp)])
 
-    expected_state_action_values = rewards + (1. - terminations.float()) * gamma * next_state_values
+    expected_state_action_values = torch.stack([drewards[:, i] + (1. - terminations.float()) * gamma * next_state_values[i] for i in range(nrcmp)])
 
     criterion = nn.MSELoss(reduction = "none")
-    td_errors = criterion(state_action_values.float(), expected_state_action_values.unsqueeze(1).float())
+    td_errors = [criterion(state_action_values[_].float(), expected_state_action_values[_].unsqueeze(1).float()) for _ in range(nrcmp)]
+    td_total = sum(td_errors)
 
     weights = batch.get("_weight")
-    loss = (weights * td_errors).mean()
+    loss = (weights * td_total).mean()
     
     optimizer.zero_grad()
     loss.backward()
-    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 1)
+#    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 1)
+    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     optimizer.step()
 
-    batch.set("td_error", td_errors)
+    batch.set("td_error", td_total)
     memory.update_tensordict_priority(batch)
 
 def parse_arguments():

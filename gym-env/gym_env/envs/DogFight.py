@@ -123,6 +123,14 @@ class DogFightEnv(gym.Env):
         self.reward_player_leaves_game = -100
         self.reward_time_penalty = -self.tau
         self.reward_approach_target = abs(self.reward_time_penalty)
+        self.n_reward_components = 7
+        self.rind_missile_miss = 0
+        self.rind_missile_hit_enemy = 1
+        self.rind_missile_hit_target = 2
+        self.rind_player_collides_with_enemy = 3
+        self.rind_player_leaves_game = 4
+        self.rind_time_penalty = 5
+        self.rind_approach_target = 6
 
         # Environment observation space:
         #  0.) Jet absolute x position
@@ -191,13 +199,16 @@ class DogFightEnv(gym.Env):
     def step(self, action):
         # Additional dictionary to track missile information for assigning
         # delayed rewards to the proper step (done outside the environment)
-        player_missile_step_info = {
+        step_info = {
             "shoot_act"    : False, # missile related action this step
             "shoot_id"     : None,  # the id of the missile shot during this step
             "hit_ids"      : [],    # the ids of the missiles that hit this step
             "miss_ids"     : [],    # the ids of the missiles that missed this step
             "hit_rewards"  : [],    # rewards for the missiles that hit
             "miss_rewards" : [],    # rewards (penalties) for the missiles that missed
+            "dreward"      : [0] * self.n_reward_components,
+            "dhit_ind"     : [],
+            "dmis_ind"     : []
         }
 
         p_shot_at_nothing = False
@@ -220,8 +231,8 @@ class DogFightEnv(gym.Env):
             )
             self.player.angle = new_missile.angle
             self.player.missiles.append(new_missile)
-            player_missile_step_info["shoot_id"] = self.player_missile_id_counter
-            player_missile_step_info["shoot_act"] = True
+            step_info["shoot_id"] = self.player_missile_id_counter
+            step_info["shoot_act"] = True
             self.player_missile_id_counter += 1
         elif action == 5:
             if not self.enemy.dead and self.player.distance_to(self.enemy) <= self.player.observation_range:
@@ -240,8 +251,8 @@ class DogFightEnv(gym.Env):
                 )
                 self.player.angle = new_missile.angle
                 self.player.missiles.append(new_missile)
-                player_missile_step_info["shoot_id"] = self.player_missile_id_counter
-                player_missile_step_info["shoot_act"] = True
+                step_info["shoot_id"] = self.player_missile_id_counter
+                step_info["shoot_act"] = True
                 self.player_missile_id_counter += 1
             else:
                 p_shot_at_nothing = True
@@ -313,28 +324,32 @@ class DogFightEnv(gym.Env):
             missile.move(self.tau)
             # Missiles going out of bounds are considered a miss
             if not missile.in_area(*(self.world_area)):
-                player_missile_step_info["miss_ids"].append(missile.id)
-                player_missile_step_info["shoot_act"] = True
-                player_missile_step_info["miss_rewards"].append(self.reward_missile_miss)
+                step_info["miss_ids"].append(missile.id)
+                step_info["shoot_act"] = True
+                step_info["miss_rewards"].append(self.reward_missile_miss)
+                step_info["dmis_ind"].append(self.rind_missile_miss)
                 self.player.missiles.remove(missile)
             # Missiles that reach their maximum range are considered a miss
             elif missile.range < missile.distance_to(missile.origin):
-                player_missile_step_info["miss_ids"].append(missile.id)
-                player_missile_step_info["shoot_act"] = True
-                player_missile_step_info["miss_rewards"].append(self.reward_missile_miss)
+                step_info["miss_ids"].append(missile.id)
+                step_info["shoot_act"] = True
+                step_info["miss_rewards"].append(self.reward_missile_miss)
+                step_info["dmis_ind"].append(self.rind_missile_miss)
                 self.player.missiles.remove(missile)
             # Missile collides with enemy
             elif not self.enemy.dead and missile.collides_with(self.enemy) and missile.target == self.enemy:
-                player_missile_step_info["hit_ids"].append(missile.id)
-                player_missile_step_info["shoot_act"] = True
-                player_missile_step_info["hit_rewards"].append(self.reward_missile_hit_enemy)
+                step_info["hit_ids"].append(missile.id)
+                step_info["shoot_act"] = True
+                step_info["hit_rewards"].append(self.reward_missile_hit_enemy)
+                step_info["dhit_ind"].append(self.rind_missile_hit_enemy)
                 self.enemy.dead = True
                 self.player.missiles.remove(missile)
             # Missile collides with target (terminating condition)
             elif missile.collides_with(self.target) and missile.fired_in_zone == True and missile.target == self.target:
-                player_missile_step_info["hit_ids"].append(missile.id)
-                player_missile_step_info["shoot_act"] = True
-                player_missile_step_info["hit_rewards"].append(self.reward_missile_hit_target)
+                step_info["hit_ids"].append(missile.id)
+                step_info["shoot_act"] = True
+                step_info["hit_rewards"].append(self.reward_missile_hit_target)
+                step_info["dhit_ind"].append(self.rind_missile_hit_target)
                 self.player.missiles.remove(missile)
                 terminated = True
                 break
@@ -343,8 +358,6 @@ class DogFightEnv(gym.Env):
         # ================================================================================
         # Immediate Rewards
         # ================================================================================
-        reward, truncated = 0, False
-
         # The player gets hit by an enemy bullet (terminating)
         p_hit_by_missile = False
         if self.enemy.missile is not None:
@@ -354,18 +367,18 @@ class DogFightEnv(gym.Env):
                 p_hit_by_missile = True
         # The player collides with the enemy (terminating condition)
         if p_hit_by_missile or (not self.enemy.dead and self.enemy.collides_with(self.player)):
-            reward += self.reward_player_collides_with_enemy
+            step_info["dreward"][self.rind_player_collides_with_enemy] = self.reward_player_collides_with_enemy
             terminated = True
         else:
             if p_oob:
-                reward += self.reward_player_leaves_game
+                step_info["dreward"][self.rind_player_leaves_game] = self.reward_player_leaves_game
             # Constant negative reward to encourage the agent to finish sooner
             if p_shot_at_nothing:
-                reward += self.reward_missile_miss
-            reward += self.reward_time_penalty
+                step_info["dreward"][self.rind_missile_miss] = self.reward_missile_miss
+            step_info["dreward"][self.rind_time_penalty] = self.reward_time_penalty
             dist_to_target = self.player.distance_to(self.target)
             if dist_to_target < self.player_last_dist:
-                reward += self.reward_approach_target
+                step_info["dreward"][self.rind_approach_target] = self.reward_approach_target
             self.player_last_dist = dist_to_target
         # ================================================================================
 
@@ -427,10 +440,10 @@ class DogFightEnv(gym.Env):
 
         # Check if we reached the maximum episode time limit and terminate if so
         self.step_count += 1
-        if self.step_count >= self.step_limit:
-            truncated = True
+        truncated = (self.step_count >= self.step_limit)
 
-        return np.array(self.state, dtype = np.float64), reward, terminated, truncated, player_missile_step_info
+        reward = sum(step_info["dreward"])
+        return np.array(self.state, dtype = np.float64), reward, terminated, truncated, step_info
 
     # Environment reset
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -514,7 +527,7 @@ class DogFightEnv(gym.Env):
         if self.render_mode == "human":
             self.render()
 
-        return np.array(self.state, dtype = np.float64), {}
+        return np.array(self.state, dtype = np.float64), {"dreward" : [0] * self.n_reward_components}
 
     def _get_jet_vertices(self, jet):
         jet_vertices = [
