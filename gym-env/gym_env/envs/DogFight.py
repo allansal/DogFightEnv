@@ -2,22 +2,24 @@ import gymnasium as gym
 import numpy as np
 import pygame
 
+from copy import deepcopy
 from typing import Optional, Union
 
 class DogFightEnv(gym.Env):
     metadata = {
-        "render_fps" : 15,
+        "render_fps" : 4,
         "render_modes" : ["human", "rgb_array"]
     }
 
     # Initialize the environment
-    def __init__(self, render_mode = None):
+    def __init__(self, eval_mode, render_mode = None):
         # Episode time & time limit
         self.tau = 1 / self.metadata["render_fps"]
         # Time limit of 60 seconds per episode
         max_episode_seconds = 60
         self.step_count = 0
         self.step_limit = max_episode_seconds * self.metadata["render_fps"]
+        self.eval_mode = eval_mode
 
         # Rendering settings
         self.render_mode = render_mode
@@ -33,6 +35,20 @@ class DogFightEnv(gym.Env):
         self.color_teal   = (  0, 255, 255, 255)
         self.color_blue   = (  0,   0, 255, 255)
         self.color_orange = (255, 165,   0, 255)
+        self.color_yellow = (255, 255,   0, 255)
+        self.color_indigo = ( 75,   0, 130, 255)
+        self.color_violet = (127,   0, 255, 255)
+        self.rainbow_colors = [
+            self.color_red,
+            self.color_orange,
+            self.color_yellow,
+            self.color_green,
+            self.color_blue,
+            self.color_indigo,
+            self.color_violet,
+            self.color_white
+        ]
+        self.traj_lines = None
 
         # Game area settings (for out of bounds checks and other things)
         self.min_x = 0
@@ -180,6 +196,9 @@ class DogFightEnv(gym.Env):
         # 5.) Shoot enemy
         self.action_space = gym.spaces.Discrete(6)
 
+        self.paused = False
+        self.rewind_counter = 0
+
     # Take a single simulation step in the environment
     def step(self, action):
         # Additional dictionary to track missile information for assigning
@@ -193,8 +212,18 @@ class DogFightEnv(gym.Env):
             "miss_rewards" : [],    # rewards (penalties) for the missiles that missed
             "dreward"      : [0] * self.n_reward_components,
             "dhit_ind"     : [],
-            "dmis_ind"     : []
+            "dmis_ind"     : [],
+            "state_dict"   : None,
+            "rewind"       : False
         }
+
+        if self.eval_mode and self.render_mode == "human":
+            if self.paused:
+                step_info["rewind"] = self.render()
+                if self.paused:
+                    return np.array(self.state, dtype = np.float64), 0, False, False, step_info
+            if not self.paused:
+                step_info["state_dict"] = self.get_state()
 
         p_shot_at_nothing = False
         if action == 4:
@@ -218,7 +247,8 @@ class DogFightEnv(gym.Env):
             self.player.missiles.append(new_missile)
             step_info["shoot_id"] = self.player_missile_id_counter
             step_info["shoot_act"] = True
-            self.player_missile_id_counter += 1
+            if self.rewind_counter == 0:
+                self.player_missile_id_counter += 1
         elif action == 5:
             if not self.enemy.dead and self.player.distance_to(self.enemy) <= self.player.observation_range:
                 fired_in_zone = False
@@ -238,7 +268,8 @@ class DogFightEnv(gym.Env):
                 self.player.missiles.append(new_missile)
                 step_info["shoot_id"] = self.player_missile_id_counter
                 step_info["shoot_act"] = True
-                self.player_missile_id_counter += 1
+                if self.rewind_counter == 0:
+                    self.player_missile_id_counter += 1
             else:
                 p_shot_at_nothing = True
 
@@ -405,6 +436,12 @@ class DogFightEnv(gym.Env):
         )
 
         # Check if we reached the maximum episode time limit and terminate if so
+        if self.rewind_counter > 0:
+            self.rewind_counter -= 1
+            step_info["dreward"] = [0] * self.n_reward_components
+            step_info["shoot_act"] = False
+            return np.array(self.state, dtype = np.float64), 0, False, False, step_info
+
         self.step_count += 1
         truncated = (self.step_count >= self.step_limit)
 
@@ -415,6 +452,9 @@ class DogFightEnv(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed = seed)
         self.step_count = 0
+        self.paused = False
+        self.traj_lines = None
+        self.rewind_counter = 0
 
         # Initialize the player agent
         self.player = Player(
@@ -485,8 +525,10 @@ class DogFightEnv(gym.Env):
 
         self.player_last_dist = self.player.distance_to(self.target)
 
+        self.reset_start = True
         if self.render_mode == "human":
             self.render()
+        self.reset_start = False
 
         return np.array(self.state, dtype = np.float64), {"dreward" : [0] * self.n_reward_components}
 
@@ -518,6 +560,7 @@ class DogFightEnv(gym.Env):
             )
             return
 
+        rewind = False
         # Initialize screen with PyGame
         if self.screen is None:
             pygame.init()
@@ -527,7 +570,6 @@ class DogFightEnv(gym.Env):
             else:
                 self.screen = pygame.Surface(self.screen_size)
             self.lower_surface = pygame.Surface(self.screen_size)
-            self.lower_surface = pygame.transform.flip(self.lower_surface, flip_x = True, flip_y = False)
             self.shadow_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
             self.pobs_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
             self.zone_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
@@ -591,19 +633,88 @@ class DogFightEnv(gym.Env):
                 missile.radius
             )
 
-        self.screen.blit(self.lower_surface, (0, 0))
+        lower_flip_surf = pygame.transform.flip(self.lower_surface, False, True)
+        self.screen.blit(lower_flip_surf, (0, 0))
 
         # PyGame event handling and timing
         if self.render_mode == "human":
-            pygame.event.pump()
+            if self.paused and self.eval_mode:
+                if self.traj_lines is not None:
+                    for idx, point_pair in enumerate(self.traj_lines):
+                        pygame.draw.line(
+                            self.screen,
+                            self.rainbow_colors[idx % len(self.rainbow_colors)],
+                            point_pair[0],
+                            point_pair[1],
+                            3
+                        )
+            else:
+                self.traj_lines = None
+
+            for event in pygame.event.get():
+                if self.eval_mode:
+                    if event.type == pygame.KEYDOWN and not self.reset_start:
+                        if event.key == pygame.K_SPACE:
+                            self.paused = not self.paused
+                    elif event.type == pygame.MOUSEBUTTONDOWN and not self.reset_start:
+                        if event.button == 1:
+                            if self.traj_lines is None:
+                                pp0 = (self.player.x, self.max_y - self.player.y)
+                            else:
+                                pp0 = (self.traj_lines[-1][1][0], self.traj_lines[-1][1][1])
+
+                            xmul = round((event.pos[0] - pp0[0]) / (self.player.speed * self.tau))
+                            ymul = round((event.pos[1] - pp0[1]) / (self.player.speed * self.tau))
+                            dx = self.player.speed * self.tau * xmul
+                            dy = self.player.speed * self.tau * ymul
+                            if abs(dy) > abs(dx):
+                                if self.traj_lines is None:
+                                    pp1 = (self.player.x, self.max_y - self.player.y + dy)
+                                else:
+                                    pp1 = (self.traj_lines[-1][1][0], self.traj_lines[-1][1][1] + dy)
+                            else:
+                                if self.traj_lines is None:
+                                    pp1 = (self.player.x + dx, self.max_y - self.player.y)
+                                else:
+                                    pp1 = (self.traj_lines[-1][1][0] + dx, self.traj_lines[-1][1][1])
+
+                            if abs(xmul) > 0 or abs(ymul) > 0:
+                                if self.traj_lines is None:
+                                    self.traj_lines = []
+                                self.traj_lines.append((pp0, pp1))
+                        else:
+                            if self.traj_lines is not None:
+                                self.traj_lines.pop()
+                                if len(self.traj_lines) == 0:
+                                    self.traj_lines = None
+            keys = pygame.key.get_pressed()
+            if keys[pygame.K_LEFT] and self.rewind_counter < self.step_count and self.paused:
+                self.traj_lines = None
+                rewind = True
+                self.rewind_counter += 1
+
             pygame.display.flip()
             self.clock.tick(self.metadata["render_fps"])
+            return rewind
 
     # Close the environment
     def close(self):
         if self.screen is not None:
             pygame.display.quit()
             pygame.quit()
+
+    def get_state(self):
+        state_dict = {
+            "player" : deepcopy(self.player),
+            "enemy"  : deepcopy(self.enemy),
+            "target" : deepcopy(self.target)
+        }
+        return state_dict
+
+    def set_state(self, state_dict):
+        self.player = state_dict["player"]
+        self.enemy = state_dict["enemy"]
+        self.target = state_dict["target"]
 
 # More generic entity class for the game
 class Entity():

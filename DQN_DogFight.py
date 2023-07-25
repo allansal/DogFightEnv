@@ -62,7 +62,7 @@ def main():
 
     # Define gym environment
     render_mode = "human" if args.render else None
-    env = gym.make("gym_env/DogFight", render_mode = render_mode)
+    env = gym.make("gym_env/DogFight", eval_mode = args.evaluate, render_mode = render_mode)
 
     state, info = env.reset()
     n_actions = env.action_space.n
@@ -132,6 +132,8 @@ def main():
 
         shooting_transitions = []
         shooting_flags = []
+        state_rewind_memory = []
+        last_unpaused = True
         for t in count():
             # Epsilon greedy
             sample = random.random()
@@ -142,6 +144,16 @@ def main():
                 action = torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
 
             next_state, reward, terminated, truncated, info = env.step(action.item())
+            if info["rewind"] and len(state_rewind_memory) > 0:
+                env.unwrapped.set_state(state_rewind_memory.pop())
+                continue
+            if env.unwrapped.get_wrapper_attr("paused") and args.evaluate and not last_unpaused:
+                continue
+
+            if info["state_dict"] is not None:
+                state_rewind_memory.append(info["state_dict"])
+
+            last_unpaused = not env.unwrapped.get_wrapper_attr("paused")
             running_reward += reward
             dreward = info["dreward"]
             dreward = torch.tensor([dreward], device = device)
@@ -270,9 +282,6 @@ def optimize_model(policy_net, target_net, optimizer, gamma, memory, nrcmp):
 
     td_errors = nn.functional.mse_loss(state_action_values, expected_state_action_values, reduction = "none")
     td_total = torch.sum(td_errors, dim = 1)
-#    td_sums = torch.sum(td_errors, dim = 1)
-#    for i in range(td_sums.shape[0]):
-#    td_total = sum(td_errors)
 
     weights = batch.get("_weight")
     loss = (weights * td_total).mean()
