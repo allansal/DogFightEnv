@@ -42,7 +42,8 @@ class DecompDQN(nn.Module):
 
     def forward(self, x):
         x = self.trunk(x)
-        return [branch(x) for branch in self.branches]
+        x = torch.stack([branch(x) for branch in self.branches])
+        return x
 
 def main():
     base_dir = "./checkpoints"
@@ -119,16 +120,22 @@ def main():
         state, info = env.reset()
         state = torch.tensor(state, device = device, dtype = torch.float32).unsqueeze(0)
         running_reward = 0
-        eps = max(args.eps_min, eps_max * eps_decay ** i)
+        if not args.evaluate:
+            eps = max(args.eps_min, eps_max * eps_decay ** i)
+        else:
+            eps = args.eval_eps
         print("--------------------------------------------------------------------------------")
-        print(f"Episode {i:6d} started, epsilon: {eps}")
+        if j >= args.exploration_episodes:
+            print(f"Episode {i:6d} / {num_episodes:6d} started, epsilon: {eps}")
+        else:
+            print(f"Pure exploration episode {j:6d} / {args.exploration_episodes:6d} started")
 
         shooting_transitions = []
         shooting_flags = []
         for t in count():
             # Epsilon greedy
             sample = random.random()
-            if args.evaluate or sample > eps:
+            if sample > eps:
                 with torch.no_grad():
                     action = sum(policy_net(state)).max(dim = 1)[1].view(1, 1)
             else:
@@ -192,7 +199,10 @@ def main():
                     optimize_model(policy_net, target_net, optimizer, args.gamma, memory, n_reward_components)
                     update_target(policy_net, target_net, args.tau)
 
-        print(f"Episode {i:6d} ended, reward: {running_reward}")
+        if j >= args.exploration_episodes:
+            print(f"Episode {i:6d} / {num_episodes:6d} ended, reward: {running_reward}")
+        else:
+            print(f"Pure exploration episode {j:6d} / {args.exploration_episodes:6d} done, reward: {running_reward}")
         if not args.evaluate:
             episode_rewards.append(running_reward)
             if ((i - start + 1) % args.checkpoint_interval) == 0 or i + 1 == num_episodes:
@@ -245,22 +255,30 @@ def optimize_model(policy_net, target_net, optimizer, gamma, memory, nrcmp):
     drewards = torch.cat([s for s in batch["dreward"]])
     terminations = torch.cat([s for s in batch["terminated"]])
 
-    state_action_values = torch.stack([policy_net(states)[i].gather(1, actions) for i in range(nrcmp)])
+    state_action_q_values = policy_net(states)
+    state_action_values = torch.stack([
+        state_action_q_values[_].gather(1, actions) for _ in range(state_action_q_values.shape[0])
+    ]).transpose(0, 1).flatten(1, 2)
     with torch.no_grad():
-        next_state_values = torch.stack([target_net(next_states)[i].max(1)[0] for i in range(nrcmp)])
+        next_state_q_values = target_net(next_states)
+        q_sum = next_state_q_values.transpose(0, 1).sum(dim = 1)
+        next_state_values = torch.stack([
+            next_state_q_values[_].gather(1, q_sum.max(1)[1].unsqueeze(1)) for _ in range(next_state_q_values.shape[0])
+        ]).transpose(0, 1).flatten(1, 2)
 
-    expected_state_action_values = torch.stack([drewards[:, i] + (1. - terminations.float()) * gamma * next_state_values[i] for i in range(nrcmp)])
+    expected_state_action_values = drewards + (1 - terminations.unsqueeze(1).float()) * gamma * next_state_values
 
-    criterion = nn.MSELoss(reduction = "none")
-    td_errors = [criterion(state_action_values[_].float(), expected_state_action_values[_].unsqueeze(1).float()) for _ in range(nrcmp)]
-    td_total = sum(td_errors)
+    td_errors = nn.functional.mse_loss(state_action_values, expected_state_action_values, reduction = "none")
+    td_total = torch.sum(td_errors, dim = 1)
+#    td_sums = torch.sum(td_errors, dim = 1)
+#    for i in range(td_sums.shape[0]):
+#    td_total = sum(td_errors)
 
     weights = batch.get("_weight")
     loss = (weights * td_total).mean()
-    
+
     optimizer.zero_grad()
     loss.backward()
-#    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 1)
     torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     optimizer.step()
 
@@ -287,6 +305,7 @@ def parse_arguments():
     parser.add_argument("--per-beta", type = float, default = 0.45, help = "PER (prioritized experience replay) beta value")
     parser.add_argument("--per-eps", type = float, default = 1e-6, help = "PER (prioritized experience replay) epsilon value")
     parser.add_argument("--tau", type = float, default = 0.005, help = "Soft-update rate between target and policy networks")
+    parser.add_argument("--eval-eps", type = float, default = 0.0, help = "Epsilon value for evaluation")
 
     args = parser.parse_args()
     return args

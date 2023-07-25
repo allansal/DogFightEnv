@@ -39,6 +39,7 @@ class DogFightEnv(gym.Env):
         self.max_x = self.screen_size[0]
         self.min_y = 0
         self.max_y = self.screen_size[1]
+        self.max_d = np.sqrt(self.max_x**2 + self.max_y**2)
         self.origin = (0.5 * self.max_x, 0.5 * self.max_y)
         self.world_area = (0, 0, self.max_x, self.max_y)
 
@@ -121,7 +122,7 @@ class DogFightEnv(gym.Env):
         self.reward_missile_hit_target = 100
         self.reward_player_collides_with_enemy = -500
         self.reward_player_leaves_game = -100
-        self.reward_time_penalty = -self.tau
+        self.reward_time_penalty = -2 * self.tau
         self.reward_approach_target = abs(self.reward_time_penalty)
         self.n_reward_components = 7
         self.rind_missile_miss = 0
@@ -132,22 +133,16 @@ class DogFightEnv(gym.Env):
         self.rind_time_penalty = 5
         self.rind_approach_target = 6
 
-        # Environment observation space:
-        #  0.) Jet absolute x position
-        #  1.) Jet absolute y position
-        #  2.) Target relative x position
-        #  3.) Target relative y position
-        #  4.) Target distance from player
-        #  5.) Enemy visibility
-        #  6.) Enemy relative x position
-        #  7.) Enemy relative y position
-        #  8.) Enemy distance from player
-        #  9.) Enemy angle to player
-        # 10.) Enemy bullet visibility
-        # 11.) Enemy bullet relative x position
-        # 12.) Enemy bullet relative y position
-        # 13.) Enemy bullet distance from player
-        # 14.) Enemy bullet angle to player
+        # 0.) Jet absolute x position
+        # 1.) Jet absolute y position
+        # 2.) Angle to target (from player coord-system)
+        # 3.) Distance to target
+        # 4.) Enemy visibility
+        # 5.) Angle to enemy (from player coord-system)
+        # 6.) Distance to enemy
+        # 7.) Enemy bullet visibility
+        # 8.) Angle to enemy bullet (from player coord-system)
+        # 9.) Distance to enemy bullet
         self.observation_space = gym.spaces.Box(
             low = np.array([
                 np.finfo(np.float64).min,
@@ -159,12 +154,7 @@ class DogFightEnv(gym.Env):
                 np.finfo(np.float64).min,
                 np.finfo(np.float64).min,
                 np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
-                np.finfo(np.float64).min,
+                np.finfo(np.float64).min
             ]),
             high = np.array([
                 np.finfo(np.float64).max,
@@ -176,12 +166,7 @@ class DogFightEnv(gym.Env):
                 np.finfo(np.float64).max,
                 np.finfo(np.float64).max,
                 np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
-                np.finfo(np.float64).max,
+                np.finfo(np.float64).max
             ]),
             dtype = np.float64
         )
@@ -322,15 +307,8 @@ class DogFightEnv(gym.Env):
         terminated = False
         for missile in self.player.missiles[:]:
             missile.move(self.tau)
-            # Missiles going out of bounds are considered a miss
-            if not missile.in_area(*(self.world_area)):
-                step_info["miss_ids"].append(missile.id)
-                step_info["shoot_act"] = True
-                step_info["miss_rewards"].append(self.reward_missile_miss)
-                step_info["dmis_ind"].append(self.rind_missile_miss)
-                self.player.missiles.remove(missile)
             # Missiles that reach their maximum range are considered a miss
-            elif missile.range < missile.distance_to(missile.origin):
+            if missile.range < missile.distance_to(missile.origin):
                 step_info["miss_ids"].append(missile.id)
                 step_info["shoot_act"] = True
                 step_info["miss_rewards"].append(self.reward_missile_miss)
@@ -386,56 +364,44 @@ class DogFightEnv(gym.Env):
             self.render()
 
         # Prepare to return the observations in a normalized manner
-        if self.enemy.dead or self.player.distance_to(self.enemy) > self.player.observation_range:
-            enemy_visible = 0.
-            ex_norm = 0.
-            ey_norm = 0.
-            ed_norm = 0.
-            ea_norm = 0.
-        else:
-            enemy_visible = 1.
-            ex_norm = (self.enemy.x - self.player.x) / self.player.observation_range
-            ey_norm = (self.enemy.y - self.player.y) / self.player.observation_range
-            ed_norm = self.player.distance_to(self.enemy) / self.player_observation_range
-            ea_norm = self.enemy.angle_to(self.player) / np.pi
-        if (
-            self.enemy.missile is not None and
-            self.player.distance_to(self.enemy.missile) <= self.player.observation_range
-        ):
-            enemy_missile_visible = 1.
-            emx_norm = (self.enemy.missile.x - self.player.x) / self.player.observation_range
-            emy_norm = (self.enemy.missile.y - self.player.y) / self.player.observation_range
-            emd_norm = self.player.distance_to(self.enemy.missile) / self.player_observation_range
-            ema_norm = self.enemy.missile.angle_to(self.player) / np.pi
-        else:
-            enemy_missile_visible = 0.
-            emx_norm = 0.
-            emy_norm = 0.
-            emd_norm = 0.
-            ema_norm = 0.
         px_norm = self.player.x / self.max_x
         py_norm = self.player.y / self.max_y
-        tx_norm = (self.target.x - self.player.x) / self.max_x
-        ty_norm = (self.target.y - self.player.y) / self.max_y
-        max_d = np.sqrt(self.max_x**2 + self.max_y**2)
-        td_norm = self.player.distance_to(self.target) / max_d
+        tdx = self.target.x - self.player.x
+        tdy = self.target.y - self.player.y
+        ta_norm = np.arctan2(tdy, tdx) / np.pi
+        td_norm = self.player.distance_to(self.target) / self.max_d
+        if self.enemy.dead or self.player.distance_to(self.enemy) > self.player.observation_range:
+            enemy_visible = 0.
+            ea_norm = 0.
+            ed_norm = 0.
+        else:
+            enemy_visible = 1.
+            edx = self.enemy.x - self.player.x
+            edy = self.enemy.y - self.player.y
+            ea_norm = np.arctan2(edy, edx) / np.pi
+            ed_norm = self.player.distance_to(self.enemy) / self.max_d
+        if self.enemy.missile is None or self.player.distance_to(self.enemy.missile) > self.player.observation_range:
+            enemy_missile_visible = 0.
+            ema_norm = 0.
+            emd_norm = 0.
+        else:
+            enemy_missile_visible = 1.
+            emdx = self.enemy.missile.x - self.player.x
+            emdy = self.enemy.missile.y - self.player.y
+            ema_norm = np.arctan2(emdy, emdx) / np.pi
+            emd_norm = self.player.distance_to(self.enemy.missile) / self.max_d
 
         self.state = (
             px_norm,
             py_norm,
-            tx_norm,
-            ty_norm,
+            ta_norm,
             td_norm,
             enemy_visible,
-            ex_norm,
-            ey_norm,
-            ed_norm,
             ea_norm,
+            ed_norm,
             enemy_missile_visible,
-            emx_norm,
-            emy_norm,
-            emd_norm,
-            ema_norm
+            ema_norm,
+            emd_norm
         )
 
         # Check if we reached the maximum episode time limit and terminate if so
@@ -488,38 +454,33 @@ class DogFightEnv(gym.Env):
         # Initialize the target somewhere outside the player's detection range
         txy = [self.player.x, self.player.y]
         while self.player.distance_to(txy) < self.player.observation_range:
-            txy[0] = np.random.uniform(self.world_area[0], self.world_area[0] + self.world_area[2])
-            txy[1] = np.random.uniform(self.world_area[1], self.world_area[1] + self.world_area[3])
+            txy[0] = np.random.uniform(self.world_area[0] + 45, self.world_area[0] + self.world_area[2] - 45)
+            txy[1] = np.random.uniform(self.world_area[1] + 45, self.world_area[1] + self.world_area[3] - 45)
         self.target = Entity(
             txy[0],
             txy[1],
             radius = self.target_radius
         )
 
-        # Normalized initial state observation preparation
+        # Prepare to return the observations in a normalized manner
         px_norm = self.player.x / self.max_x
         py_norm = self.player.y / self.max_y
-        tx_norm = (self.target.x - self.player.x) / self.max_x
-        ty_norm = (self.target.y - self.player.y) / self.max_y
-        max_d = np.sqrt(self.max_x**2 + self.max_y**2)
-        td_norm = self.player.distance_to(self.target) / max_d
+        tdx = self.target.x - self.player.x
+        tdy = self.target.y - self.player.y
+        ta_norm = np.arctan2(tdy, tdx) / np.pi
+        td_norm = self.player.distance_to(self.target) / self.max_d
 
         self.state = (
             px_norm,
             py_norm,
-            tx_norm,
-            ty_norm,
+            ta_norm,
             td_norm,
             0.,
             0.,
             0.,
             0.,
             0.,
-            0.,
-            0.,
-            0.,
-            0.,
-            0.,
+            0.
         )
 
         self.player_last_dist = self.player.distance_to(self.target)
