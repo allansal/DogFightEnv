@@ -1,8 +1,8 @@
 import argparse
 import copy
-import datetime
 import gymnasium as gym
 import matplotlib.pyplot as plt
+import numpy as np
 import os
 import pandas as pd
 import pickle
@@ -12,8 +12,10 @@ import torch
 
 import gym_env
 
+from datetime import datetime
 from itertools import count
 from tensordict import TensorDict
+from time import sleep
 from torch import nn, optim
 from torchrl.data import TensorDictPrioritizedReplayBuffer, LazyTensorStorage
 
@@ -50,6 +52,37 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args = parse_arguments()
 
+    msep_explanations = [
+        "I will preserve ammunition and miss fewer bullets",
+        "I am more likely to successfully shoot the enemy",
+        "I am more likely to successfully shoot the target",
+        "I will avoid colliding with the enemy and its missile",
+        "I need to stay within the combat zone and complete my mission",
+        "I need to complete the mission in a timely manner",
+        "I need to approach the target's firing zone to land a successful hit"
+    ]
+    msen_explanations = [
+        "I will waste more ammunition",
+        "I am less likely to successfully hit the enemy",
+        "I am less likely to successfully hit the target",
+        "I would most likely collide with the enemy and its missile",
+        "I would be leaving the combat zone and abandon the mission",
+        "I will waste time",
+        "I am increasing my distance from the target such that I can't successfully shoot it"
+    ]
+
+    # Set the random seed
+    seed = args.seed
+    if seed is None:
+        seed = int(datetime.now().timestamp())
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     # Create checkpoints folder if it doesn't exist
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)
@@ -62,10 +95,10 @@ def main():
 
     # Define gym environment
     render_mode = "human" if args.render else None
-    env = gym.make("gym_env/DogFight", eval_mode = args.evaluate, render_mode = render_mode)
+    env = gym.make("gym_env/DogFight", time_limit = args.episode_time, eval_mode = args.evaluate, render_mode = render_mode)
 
-    state, info = env.reset()
     n_actions = env.action_space.n
+    state, info = env.reset()
     n_observations = len(state)
     n_reward_components = len(info["dreward"])
 
@@ -108,7 +141,6 @@ def main():
     if args.evaluate:
         policy_net.eval()
         target_net.eval()
-
     optimizer = optim.AdamW(policy_net.parameters(), lr = args.lr, amsgrad = True)
 
     i = start
@@ -117,13 +149,15 @@ def main():
     eps_max = args.eps_max
     eps_decay = (eps_min / eps_max) ** (1. / (num_episodes - start))
     while i < num_episodes:
+        rewind_memory = []
         state, info = env.reset()
+        start_state = env.unwrapped.get_state()
+        paused_state = start_state
         state = torch.tensor(state, device = device, dtype = torch.float32).unsqueeze(0)
+        rewind_memory.append((start_state, copy.deepcopy(state)))
         running_reward = 0
-        if not args.evaluate:
-            eps = max(args.eps_min, eps_max * eps_decay ** i)
-        else:
-            eps = args.eval_eps
+        eps = 0 if args.evaluate else max(args.eps_min, eps_max * eps_decay ** i)
+
         print("--------------------------------------------------------------------------------")
         if j >= args.exploration_episodes:
             print(f"Episode {i:6d} / {num_episodes:6d} started, epsilon: {eps}")
@@ -132,34 +166,158 @@ def main():
 
         shooting_transitions = []
         shooting_flags = []
-        state_rewind_memory = []
-        last_unpaused = True
+#        last_paused = False
+        # (True) factual index
+        tfact_idx = 0
+        tfact_done = False
+        # Counter factual index
+        cfact_idx = 0
+        cfact_done = False
+        # Step limit for performing factual / counterfactual trajectories
+        traj_limit = 0
+#        paused_state = None
+        # Store the states for the factual and counterfactual scenarios
+        # to do batch processing for the Q-values afterwards
+        tfact_states = torch.tensor([])
+        cfact_states = torch.tensor([])
+        qsa1 = torch.zeros(n_reward_components, 1)
+        qsa2 = torch.zeros(n_reward_components, 1)
+        do_split_facts = False
+        is_paused = False
         for t in count():
-            # Epsilon greedy
-            sample = random.random()
-            if sample > eps:
-                with torch.no_grad():
-                    action = sum(policy_net(state)).max(dim = 1)[1].view(1, 1)
-            else:
-                action = torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
+            if env.unwrapped.rewind:
+#                paused_state = rewind_memory.pop()
+#                env.unwrapped.set_state(paused_state)
+                if len(rewind_memory) > 1:
+                    tmp_state, state = rewind_memory.pop()
+                    env.unwrapped.set_state(tmp_state)
+                    paused_state = tmp_state
+                else:
+                    env.unwrapped.set_state(rewind_memory[0][0])
+                    paused_state = rewind_memory[0][0]
+                    state = rewind_memory[0][1]
+
+            if not is_paused and env.unwrapped.paused:
+                is_paused = True
+                paused_state = rewind_memory[-1][0]
+                state = rewind_memory[-1][1]
+#                env_state = env.unwrapped.get_state()
+#                paused_state = env.unwrapped.get_state()
+#                paused_state = env_state
+#                rewind_memory.append(env_state)
+            elif is_paused and not env.unwrapped.paused:
+                is_paused = False
+#                paused_state = None
+
+            if not do_split_facts and env.unwrapped.perform_split_facts:
+                do_split_facts = True
+            elif do_split_facts and not env.unwrapped.perform_split_facts:
+                do_split_facts = False
+
+#            if env.unwrapped.perform_split_facts:
+            if do_split_facts:
+                if (not tfact_done and tfact_idx == 0) and (not cfact_done and cfact_idx == 0):
+#                    paused_state = env.unwrapped.get_state()
+                    traj_limit = len(env.unwrapped.counterfactual_trajectories)
+                    env.unwrapped.draw_actions = True
+
+#                if tfact_idx < traj_limit:
+                if not tfact_done:
+                    with torch.no_grad():
+                        out = policy_net(state)
+                        action = out.sum(dim = 0).max(dim = 1)[1].view(1, 1)
+                        qsa1 += out[:, :, action.item()]
+                    tfact_idx += 1
+#                elif cfact_idx < traj_limit:
+                elif not cfact_done:
+                    if cfact_idx == 0:
+                        env.unwrapped.set_state(paused_state)
+                    action = torch.tensor(
+                        [[env.unwrapped.counterfactual_trajectories[cfact_idx]]],
+                        device = device,
+                        dtype = torch.long
+                    )
+                    cfact_idx += 1
+                else:
+                    print(f"Got here @:\ntfact_idx = {tfact_idx}\ncfact_idx = {cfact_idx}")
+                    cfact_actions = torch.tensor([env.unwrapped.counterfactual_trajectories]).T
+                    cfact_out = policy_net(cfact_states)
+#                    cfact_qvals = torch.stack([cfact_out[_].gather(1, cfact_actions) for _ in range(cfact_out.shape[0])]).transpose(0, 1)
+#                    cfact_qvals = torch.stack([cfact_out[_].gather(1, cfact_actions[:cfact_idx + 1]) for _ in range(cfact_out.shape[0])]).transpose(0, 1)
+                    cfact_qvals = torch.stack([cfact_out[_].gather(1, cfact_actions[:cfact_idx]) for _ in range(cfact_out.shape[0])]).transpose(0, 1)
+                    qsa2 = torch.sum(cfact_qvals, dim = 0)
+#                    print(f"qsa1:\n{qsa1}")
+#                    print(f"qsa2:\n{qsa2}")
+                    dc = qsa1 - qsa2
+#                    print(f"dc:\n{dc}")
+                    mask = (qsa2 > qsa1).float()
+#                    print(f"mask:\n{mask}")
+                    disadvantage = (mask * dc.abs()).sum(dim = 0)
+#                    print(f"disadvantage:\n{disadvantage.item()}")
+                    tmp_p = dc.sort(dim = 0, descending = True)
+                    order_dcp = dc.sort(dim = 0, descending = True)[0]
+#                    print(f"descending dc:\n{order_dcp}")
+                    msep = torch.tensor([[order_dcp[:_].sum(dim = 0) > disadvantage for _ in range(1, order_dcp.shape[0] + 1)]]).T
+#                    print(f"mse+:\n{msep}")
+                    msep_ind = msep.float().argmax()
+#                    print(f"mse+ argmax: {msep_ind.item()}")
+#                    print(f"corresponding index in original dc list: {tmp_p[1][msep_ind].item()}")
+                    print(f"\n\nAdvantage to my trajectory:")
+                    for _ in range(msep_ind.item() + 1):
+                        print(f"{msep_explanations[tmp_p[1][_].item()]}")
+                    tmp_n = dc.sort(dim = 0, descending = False)
+                    print(f"\n\nDisadvantages to my trajectory:")
+                    for _ in range(msep_ind.item() + 1):
+                        if tmp_n[0][_] < 0:
+                            print(f"{msen_explanations[tmp_n[1][_].item()]}")
+
+
+                    cfact_states = torch.tensor([])
+                    tfact_idx = 0
+                    tfact_done = False
+                    cfact_idx = 0
+                    cfact_done = False
+                    traj_limit = 0
+                    do_split_facts = False
+                    env.unwrapped.perform_split_facts = False
+                    env.unwrapped.set_state(paused_state)
+                    state = rewind_memory[-1][1]
+#                    is_paused = True
+#                    env.unwrapped.paused = True
+                    env.unwrapped.draw_actions = False
+
+#            if not env.unwrapped.perform_split_facts:
+            if not do_split_facts:
+                if args.evaluate or random.random() > eps:
+                    with torch.no_grad():
+                        action = sum(policy_net(state)).max(dim = 1)[1].view(1, 1)
+                else:
+                    action = torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
 
             next_state, reward, terminated, truncated, info = env.step(action.item())
-            if info["rewind"] and len(state_rewind_memory) > 0:
-                env.unwrapped.set_state(state_rewind_memory.pop())
+            if is_paused and not do_split_facts:
                 continue
-            if env.unwrapped.get_wrapper_attr("paused") and args.evaluate and not last_unpaused:
-                continue
+#            if env.unwrapped.paused or (not env.unwrapped.paused and last_paused):
+#                continue
+#            if env.unwrapped.paused:
+#                paused_state = env.unwrapped.get_state()
 
-            if info["state_dict"] is not None:
-                state_rewind_memory.append(info["state_dict"])
-
-            last_unpaused = not env.unwrapped.get_wrapper_attr("paused")
-            running_reward += reward
+#            last_unpaused = not env.unwrapped.get_wrapper_attr("paused")
+#            if not env.unwrapped.perform_split_facts:
+#            if not do_split_facts:
+            if not is_paused:
+                running_reward += reward
             dreward = info["dreward"]
             dreward = torch.tensor([dreward], device = device)
             next_state = torch.tensor(next_state, device = device, dtype = torch.float32).unsqueeze(0)
             done = terminated or truncated
             terminated = torch.tensor([terminated], device = device, dtype = torch.bool)
+
+#            if env.unwrapped.perform_split_facts:
+            if do_split_facts:
+                if tfact_done and not cfact_done:
+#                if cfact_idx < traj_limit and tfact_idx >= traj_limit:
+                    cfact_states = torch.cat((cfact_states, next_state), 0)
 
             transition = TensorDict(
                 {
@@ -172,7 +330,8 @@ def main():
                 batch_size = []
             )
 
-            if info["shoot_act"]:
+#            if not env.unwrapped.perform_split_facts and info["shoot_act"]:
+            if not do_split_facts and info["shoot_act"]:
                 shooting_transitions.append(transition)
                 shooting_flags.append(info)
             elif not args.evaluate:
@@ -182,7 +341,26 @@ def main():
                     update_target(policy_net, target_net, args.tau)
 
             if done:
-                break
+                if not env.unwrapped.perform_split_facts:
+                    break
+                if not tfact_done:
+                    tfact_done = True
+                elif not cfact_done:
+                    cfact_done = True
+#                if tfact_idx < traj_limit:
+#                    tfact_idx = traj_limit + 1
+#                elif cfact_idx < traj_limit:
+#                    cfact_idx = traj_limit + 1
+
+#            if env.unwrapped.perform_split_facts:
+            if do_split_facts:
+                if not tfact_done and tfact_idx >= traj_limit:
+                    tfact_done = True
+                elif not cfact_done and cfact_idx >= traj_limit:
+                    cfact_done = True
+
+            if not is_paused:
+                rewind_memory.append((env.unwrapped.get_state(), copy.deepcopy(next_state)))
 
             state = next_state
 
@@ -313,8 +491,9 @@ def parse_arguments():
     parser.add_argument("--per-alpha", type = float, default = 0.65, help = "PER (prioritized experience replay) alpha value")
     parser.add_argument("--per-beta", type = float, default = 0.45, help = "PER (prioritized experience replay) beta value")
     parser.add_argument("--per-eps", type = float, default = 1e-6, help = "PER (prioritized experience replay) epsilon value")
-    parser.add_argument("--tau", type = float, default = 0.005, help = "Soft-update rate between target and policy networks")
-    parser.add_argument("--eval-eps", type = float, default = 0.0, help = "Epsilon value for evaluation")
+    parser.add_argument("--tau", type = float, default = 0.005, help = "Soft-update factor between target and policy networks")
+    parser.add_argument("--seed", type = int, default = None, help = "Random seed to use")
+    parser.add_argument("--episode-time", type = int, default = 60, help = "Episode time limit (in seconds)")
 
     args = parser.parse_args()
     return args

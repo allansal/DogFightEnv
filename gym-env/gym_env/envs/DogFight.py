@@ -7,57 +7,61 @@ from typing import Optional, Union
 
 class DogFightEnv(gym.Env):
     metadata = {
-        "render_fps" : 4,
+        "render_fps"   : 15,
         "render_modes" : ["human", "rgb_array"]
     }
 
     # Initialize the environment
-    def __init__(self, eval_mode, render_mode = None):
+    def __init__(self, time_limit, eval_mode, render_mode = None):
+        # ====================================================================
+        # Constants / less volatile variables
+        # ====================================================================
+        # Environment evaluation mode indicator
+        self.EVAL_MODE = eval_mode
+
         # Episode time & time limit
-        self.tau = 1 / self.metadata["render_fps"]
-        # Time limit of 60 seconds per episode
-        max_episode_seconds = 60
-        self.step_count = 0
-        self.step_limit = max_episode_seconds * self.metadata["render_fps"]
-        self.eval_mode = eval_mode
+        self.TAU = 1 / self.metadata["render_fps"]
+        self.STEP_LIMIT = time_limit * self.metadata["render_fps"]
 
         # Rendering settings
-        self.render_mode = render_mode
-        self.screen_size = (800, 800)
-        self.screen = None
-        self.clock = None
-        self.color_white  = (255, 255, 255, 255)
-        self.color_gray   = ( 64,  64,  64, 255)
-        self.color_black  = (  0,   0,   0, 255)
-        self.color_clear  = (  0,   0,   0,   0)
-        self.color_green  = (  0, 255,   0, 255)
-        self.color_red    = (255,   0,   0, 255)
-        self.color_teal   = (  0, 255, 255, 255)
-        self.color_blue   = (  0,   0, 255, 255)
-        self.color_orange = (255, 165,   0, 255)
-        self.color_yellow = (255, 255,   0, 255)
-        self.color_indigo = ( 75,   0, 130, 255)
-        self.color_violet = (127,   0, 255, 255)
-        self.rainbow_colors = [
-            self.color_red,
-            self.color_orange,
-            self.color_yellow,
-            self.color_green,
-            self.color_blue,
-            self.color_indigo,
-            self.color_violet,
-            self.color_white
-        ]
-        self.traj_lines = None
+        self.RENDER_MODE = render_mode
+        self.SCREEN_SIZE = (800, 800)
+        self.SCREEN = None
+        self.CLOCK = None
+
+        # Colors (w/o transparency)
+        self.COLOR_RED    = (255,   0,   0, 255)
+        self.COLOR_ORANGE = (255, 165,   0, 255)
+        self.COLOR_YELLOW = (255, 255,   0, 255)
+        self.COLOR_GREEN  = (  0, 255,   0, 255)
+        self.COLOR_BLUE   = (  0,   0, 255, 255)
+        self.COLOR_INDIGO = ( 75,   0, 130, 255)
+        self.COLOR_VIOLET = (127,   0, 255, 255)
+        self.COLOR_WHITE  = (255, 255, 255, 255)
+        self.COLOR_GRAY   = (128, 128, 128, 255)
+        self.COLOR_BLACK  = (  0,   0,   0, 255)
+
+        # Colors (w/  transparency)
+        self.COLOR_CLEAR_ALPHA  = (  0,   0,   0,   0)
+        self.COLOR_RED_ALPHA    = (255,   0,   0,  32)
+        self.COLOR_ORANGE_ALPHA = (255, 165,   0,  32)
+        self.COLOR_YELLOW_ALPHA = (255, 255,   0,  32)
+        self.COLOR_GREEN_ALPHA  = (  0, 255,   0,  32)
+        self.COLOR_BLUE_ALPHA   = (  0,   0, 255,  32)
+        self.COLOR_INDIGO_ALPHA = ( 75,   0, 130,  32)
+        self.COLOR_VIOLET_ALPHA = (127,   0, 255,  32)
+        self.COLOR_WHITE_ALPHA  = (255, 255, 255,  32)
+        self.COLOR_GRAY_ALPHA   = (128, 128, 128,  32)
+        self.COLOR_BLACK_ALPHA  = (  0,   0,   0,  32)
 
         # Game area settings (for out of bounds checks and other things)
-        self.min_x = 0
-        self.max_x = self.screen_size[0]
-        self.min_y = 0
-        self.max_y = self.screen_size[1]
-        self.max_d = np.sqrt(self.max_x**2 + self.max_y**2)
-        self.origin = (0.5 * self.max_x, 0.5 * self.max_y)
-        self.world_area = (0, 0, self.max_x, self.max_y)
+        self.MIN_X = 0
+        self.MAX_X = self.SCREEN_SIZE[0]
+        self.MIN_Y = 0
+        self.MAX_Y = self.SCREEN_SIZE[1]
+        self.MAX_D = np.sqrt(self.MAX_X**2 + self.MAX_Y**2)
+        self.ORIGIN = (0.5 * self.MAX_X, 0.5 * self.MAX_Y)
+        self.WORLD_AREA = (0, 0, self.MAX_X, self.MAX_Y)
 
         # Turn directions:
         # Straight - no angle change so it is 0
@@ -68,86 +72,78 @@ class DogFightEnv(gym.Env):
         self.RIGHT    = -1
 
         # Player properties
-        self.player_radius = 10
+        self.PLAYER_RADIUS = 10
         # Player min speed: 10 seconds to cross game area
         # Player max speed:  5 seconds to cross game area
-        self.player_min_speed = self.max_x / 10
-        self.player_max_speed = self.max_x /  5
+        self.PLAYER_MIN_SPEED = self.MAX_X / 10
+        self.PLAYER_MAX_SPEED = self.MAX_X /  5
         # Player min acceleration: 0.25 seconds from max to min speed
         # Player max acceleration: 2.50 seconds from min to max speed
-        self.player_min_acceleration = (
-            -(self.player_max_speed - self.player_min_speed) / 0.25
+        self.PLAYER_MIN_ACCELERATION = (
+            -(self.PLAYER_MAX_SPEED - self.PLAYER_MIN_SPEED) / 0.25
         )
-        self.player_max_acceleration = (
-             (self.player_max_speed - self.player_min_speed) / 2.50
+        self.PLAYER_MAX_ACCELERATION = (
+             (self.PLAYER_MAX_SPEED - self.PLAYER_MIN_SPEED) / 2.50
         )
         # Player min turn rate: 4.0 seconds to do a 180
         # Player max turn rate: 2.0 seconds to do a 180
-        self.player_min_turn_rate = np.pi / 4.0
-        self.player_max_turn_rate = np.pi / 2.0
+        self.PLAYER_MIN_TURN_RATE = np.pi / 4.0
+        self.PLAYER_MAX_TURN_RATE = np.pi / 2.0
         # Player observation radius is 1/4 the width of the game area
-        self.player_observation_range = 0.35 * self.max_x
-        self.player_last_dist = None
+        self.PLAYER_OBSERVATION_RANGE = 0.35 * self.MAX_X
 
         # Player missile properties
         # Track the missiles for properly assigning delayed rewards outside env
-        self.player_missile_id_counter = 0
-        self.player_missile_radius = 3
-        self.player_missile_speed = 3.0 * self.player_max_speed
-        self.player_missile_range = 3 * self.player_observation_range
-        # Bounds of player missile's random angle offset
-        self.player_missile_angle_offset = 0.04
+        self.PLAYER_MISSILE_RADIUS = 3
+        self.PLAYER_MISSILE_SPEED = 3.0 * self.PLAYER_MAX_SPEED
+        self.PLAYER_MISSILE_RANGE = 3 * self.PLAYER_OBSERVATION_RANGE
 
         # Enemy properties
-        self.enemy_radius = 10
+        self.ENEMY_RADIUS = 10
         # Enemy is 0.8 x player speed
-        self.enemy_min_speed = 0.80 * self.player_min_speed
-        self.enemy_max_speed = 0.80 * self.player_max_speed
+        self.ENEMY_MIN_SPEED = 0.80 * self.PLAYER_MIN_SPEED
+        self.ENEMY_MAX_SPEED = 0.80 * self.PLAYER_MAX_SPEED
         # Enemy min acceleration: 0.25 seconds from max to min speed
         # Enemy max acceleration: 2.50 seconds from min to max speed
-        self.enemy_min_acceleration = (
-            -(self.enemy_max_speed - self.enemy_min_speed) / 0.25
+        self.ENEMY_MIN_ACCELERATION = (
+            -(self.ENEMY_MAX_SPEED - self.ENEMY_MIN_SPEED) / 0.25
         )
-        self.enemy_max_acceleration = (
-             (self.enemy_max_speed - self.enemy_min_speed) / 2.50
+        self.ENEMY_MAX_ACCELERATION = (
+             (self.ENEMY_MAX_SPEED - self.ENEMY_MIN_SPEED) / 2.50
         )
         # Enemy min turn rate: 4.0 seconds to do a 180
         # Enemy max turn rate: 2.0 seconds to do a 180
-        self.enemy_min_turn_rate = np.pi / 4.0
-        self.enemy_max_turn_rate = np.pi / 2.0
+        self.ENEMY_MIN_TURN_RATE = np.pi / 4.0
+        self.ENEMY_MAX_TURN_RATE = np.pi / 2.0
         # Enemy observation radius is 3/4 of the player's observation radius
-        self.enemy_observation_range = 1.25 * self.player_observation_range
-        # 0.35 radians (~20 degree firing FOV for the enemy)
-        self.enemy_firing_fov = 0.35
+        self.ENEMY_OBSERVATION_RANGE = 1.25 * self.PLAYER_OBSERVATION_RANGE
 
         # Enemy missile properties
-        self.enemy_missile_radius = 3
-        self.enemy_missile_speed = 0.250 * self.player_missile_speed
-        self.enemy_missile_range = 3 * self.enemy_observation_range
-        # Bounds of enemy missile's random angle offset
-        self.enemy_missile_angle_offset = 0.04
+        self.ENEMY_MISSILE_RADIUS = 3
+        self.ENEMY_MISSILE_SPEED = 0.250 * self.PLAYER_MISSILE_SPEED
+        self.ENEMY_MISSILE_RANGE = 3 * self.ENEMY_OBSERVATION_RANGE
 
         # Target properties
-        self.target_radius = 30
+        self.TARGET_RADIUS = 30
         # Range from which player missiles will destroy the target
-        self.target_opening_range = 0.35 * self.player_missile_range
+        self.TARGET_OPENING_RANGE = 0.35 * self.PLAYER_MISSILE_RANGE
 
         # Reward definitions
-        self.reward_missile_miss = -0.75 * self.tau
-        self.reward_missile_hit_enemy = 50
-        self.reward_missile_hit_target = 100
-        self.reward_player_collides_with_enemy = -500
-        self.reward_player_leaves_game = -100
-        self.reward_time_penalty = -2 * self.tau
-        self.reward_approach_target = abs(self.reward_time_penalty)
-        self.n_reward_components = 7
-        self.rind_missile_miss = 0
-        self.rind_missile_hit_enemy = 1
-        self.rind_missile_hit_target = 2
-        self.rind_player_collides_with_enemy = 3
-        self.rind_player_leaves_game = 4
-        self.rind_time_penalty = 5
-        self.rind_approach_target = 6
+        self.REWARD_MISSILE_MISS = -0.75 * self.TAU
+        self.REWARD_MISSILE_HIT_ENEMY = 50
+        self.REWARD_MISSILE_HIT_TARGET = 100
+        self.REWARD_PLAYER_COLLIDES_WITH_ENEMY = -500
+        self.REWARD_PLAYER_LEAVES_GAME = -100
+        self.REWARD_TIME_PENALTY = -2 * self.TAU
+        self.REWARD_APPROACH_TARGET = abs(self.REWARD_TIME_PENALTY)
+        self.N_REWARD_COMPONENTS = 7
+        self.RIND_MISSILE_MISS = 0
+        self.RIND_MISSILE_HIT_ENEMY = 1
+        self.RIND_MISSILE_HIT_TARGET = 2
+        self.RIND_PLAYER_COLLIDES_WITH_ENEMY = 3
+        self.RIND_PLAYER_LEAVES_GAME = 4
+        self.RIND_TIME_PENALTY = 5
+        self.RIND_APPROACH_TARGET = 6
 
         # 0.) Jet absolute x position
         # 1.) Jet absolute y position
@@ -188,19 +184,56 @@ class DogFightEnv(gym.Env):
         )
 
         # Environment action space:
-        # 0.) Forward
-        # 1.) Backward
+        # 0.) Down
+        # 1.) Up
         # 2.) Left
         # 3.) Right
         # 4.) Shoot target
         # 5.) Shoot enemy
         self.action_space = gym.spaces.Discrete(6)
+        self.ACTION_DOWN         = 0
+        self.ACTION_UP           = 1
+        self.ACTION_LEFT         = 2
+        self.ACTION_RIGHT        = 3
+        self.ACTION_SHOOT_TARGET = 4
+        self.ACTION_SHOOT_ENEMY  = 5
 
+        self.TRAJ_MOVE = 0
+        self.TRAJ_SHOOT_TARGET = 1
+        self.TRAJ_SHOOT_ENEMY  = 2
+
+        # ====================================================================
+        # Frequently updated variables (save most for getting / setting state)
+        # ====================================================================
+        self.counterfactual_trajectories = []
+        self.prop_cfact_trajectories = []
+        self.reset_start = True
+        self.state = None
+        self.perform_split_facts = False
+        self.draw_actions = False
+        self.rewind = False
+
+        self.player = None
+        self.enemy = None
+        self.target = None
+
+        self.step_count = 0
+        self.player_last_dist = np.finfo(np.float64).max
         self.paused = False
-        self.rewind_counter = 0
+        self.player_missile_id_counter = 0
+
+        self.lower_surface   = None
+        self.pobs_surface    = None
+        self.eobs_surface    = None
+        self.zone_surface    = None
+        self.factual_surface = None
+
+        self.action = None
+        self.player_starting_pos = None
 
     # Take a single simulation step in the environment
     def step(self, action):
+        self.action = action
         # Additional dictionary to track missile information for assigning
         # delayed rewards to the proper step (done outside the environment)
         step_info = {
@@ -210,24 +243,25 @@ class DogFightEnv(gym.Env):
             "miss_ids"     : [],    # the ids of the missiles that missed this step
             "hit_rewards"  : [],    # rewards for the missiles that hit
             "miss_rewards" : [],    # rewards (penalties) for the missiles that missed
-            "dreward"      : [0] * self.n_reward_components,
+            "dreward"      : [0] * self.N_REWARD_COMPONENTS,
             "dhit_ind"     : [],
             "dmis_ind"     : [],
-            "state_dict"   : None,
-            "rewind"       : False
         }
 
-        if self.eval_mode and self.render_mode == "human":
-            if self.paused:
-                step_info["rewind"] = self.render()
-                if self.paused:
-                    return np.array(self.state, dtype = np.float64), 0, False, False, step_info
-            if not self.paused:
-                step_info["state_dict"] = self.get_state()
+        if self.EVAL_MODE and self.RENDER_MODE == "human":
+#            if self.paused and not self.perform_split_facts:
+            if self.paused and not self.perform_split_facts:
+                self.render()
+                return np.array(self.state, dtype = np.float64), 0, False, False, step_info
+#                if self.paused:
+#                    return np.array(self.state, dtype = np.float64), 0, False, False, step_info
+
+        if self.perform_split_facts:
+            self.player_starting_pos = (self.player.x, self.player.y)
 
         p_shot_at_nothing = False
-        if action == 4:
-            if self.player.distance_to(self.target) <= self.target_opening_range:
+        if action == self.ACTION_SHOOT_TARGET:
+            if self.player.distance_to(self.target) <= self.TARGET_OPENING_RANGE:
                 fired_in_zone = True
             else:
                 fired_in_zone = False
@@ -235,10 +269,10 @@ class DogFightEnv(gym.Env):
             new_missile = Missile(
                 self.player.x,
                 self.player.y,
-                self.player_missile_speed,
+                self.PLAYER_MISSILE_SPEED,
                 self.player.angle + angle,
-                self.player_missile_radius,
-                self.player_missile_range,
+                self.PLAYER_MISSILE_RADIUS,
+                self.PLAYER_MISSILE_RANGE,
                 id = self.player_missile_id_counter,
                 fired_in_zone = fired_in_zone,
                 target = self.target
@@ -247,19 +281,18 @@ class DogFightEnv(gym.Env):
             self.player.missiles.append(new_missile)
             step_info["shoot_id"] = self.player_missile_id_counter
             step_info["shoot_act"] = True
-            if self.rewind_counter == 0:
-                self.player_missile_id_counter += 1
-        elif action == 5:
+            self.player_missile_id_counter += 1
+        elif action == self.ACTION_SHOOT_ENEMY:
             if not self.enemy.dead and self.player.distance_to(self.enemy) <= self.player.observation_range:
                 fired_in_zone = False
                 angle = self.player.angle_to(self.enemy)
                 new_missile = Missile(
                     self.player.x,
                     self.player.y,
-                    self.player_missile_speed,
+                    self.PLAYER_MISSILE_SPEED,
                     self.player.angle + angle,
-                    self.player_missile_radius,
-                    self.player_missile_range,
+                    self.PLAYER_MISSILE_RADIUS,
+                    self.PLAYER_MISSILE_RANGE,
                     id = self.player_missile_id_counter,
                     fired_in_zone = fired_in_zone,
                     target = self.enemy
@@ -268,8 +301,7 @@ class DogFightEnv(gym.Env):
                 self.player.missiles.append(new_missile)
                 step_info["shoot_id"] = self.player_missile_id_counter
                 step_info["shoot_act"] = True
-                if self.rewind_counter == 0:
-                    self.player_missile_id_counter += 1
+                self.player_missile_id_counter += 1
             else:
                 p_shot_at_nothing = True
 
@@ -290,9 +322,9 @@ class DogFightEnv(gym.Env):
                     else:
                         self.enemy.guess_position = None
                 # Turn back to the center of the game area if the enemy has no target to pursue
-                elif not self.enemy.in_area(*(self.world_area)):
-                    roff = np.random.uniform(-100, 100), np.random.uniform(-100, 100)
-                    enemy_turn_direction = self.enemy.get_turn_direction_to((self.origin[0] + roff[0], self.origin[1] + roff[1]))
+                elif not self.enemy.in_area(*(self.WORLD_AREA)):
+#                    enemy_turn_direction = self.enemy.get_turn_direction_to((self.ORIGIN[0], self.ORIGIN[1]))
+                    enemy_turn_direction = self.enemy.get_turn_direction_to(self.ORIGIN)
             # If the player is in range
             else:
                 # Chase the player
@@ -308,57 +340,57 @@ class DogFightEnv(gym.Env):
                     self.enemy.missile = Missile(
                         self.enemy.x,
                         self.enemy.y,
-                        self.enemy_missile_speed,
+                        self.ENEMY_MISSILE_SPEED,
                         self.enemy.angle + self.enemy.angle_to(self.player),
-                        self.enemy_missile_radius,
-                        self.enemy_missile_range
+                        self.ENEMY_MISSILE_RADIUS,
+                        self.ENEMY_MISSILE_RANGE
                     )
 
         # Move the player
         p_oob = False
         old_pos = self.player.x, self.player.y
-        if action == 4 or action == 5:
-            self.player.move(self.tau, self.player.prev_move_dir)
+        if action == self.ACTION_SHOOT_TARGET or action == self.ACTION_SHOOT_ENEMY:
+            self.player.move(self.TAU, self.player.prev_move_dir)
         else:
-            self.player.move(self.tau, action)
+            self.player.move(self.TAU, action)
             self.player.prev_move_dir = action
-        if not self.player.in_area(*(self.world_area)):
+        if not self.player.in_area(*(self.WORLD_AREA)):
             p_oob = True
             self.player.x, self.player.y = old_pos[0], old_pos[1]
 
         # Move the enemy and its missile
         if not self.enemy.dead:
-            self.enemy.move(self.tau, turn_direction = enemy_turn_direction)
+            self.enemy.move(self.TAU, turn_direction = enemy_turn_direction)
         if self.enemy.missile is not None:
-            self.enemy.missile.move(self.tau)
+            self.enemy.missile.move(self.TAU)
 
         # ================================================================================
         # Player Missile Movement & Delayed Reward Handling
         # ================================================================================
         terminated = False
         for missile in self.player.missiles[:]:
-            missile.move(self.tau)
+            missile.move(self.TAU)
             # Missiles that reach their maximum range are considered a miss
             if missile.range < missile.distance_to(missile.origin):
                 step_info["miss_ids"].append(missile.id)
                 step_info["shoot_act"] = True
-                step_info["miss_rewards"].append(self.reward_missile_miss)
-                step_info["dmis_ind"].append(self.rind_missile_miss)
+                step_info["miss_rewards"].append(self.REWARD_MISSILE_MISS)
+                step_info["dmis_ind"].append(self.RIND_MISSILE_MISS)
                 self.player.missiles.remove(missile)
             # Missile collides with enemy
             elif not self.enemy.dead and missile.collides_with(self.enemy) and missile.target == self.enemy:
                 step_info["hit_ids"].append(missile.id)
                 step_info["shoot_act"] = True
-                step_info["hit_rewards"].append(self.reward_missile_hit_enemy)
-                step_info["dhit_ind"].append(self.rind_missile_hit_enemy)
+                step_info["hit_rewards"].append(self.REWARD_MISSILE_HIT_ENEMY)
+                step_info["dhit_ind"].append(self.RIND_MISSILE_HIT_ENEMY)
                 self.enemy.dead = True
                 self.player.missiles.remove(missile)
             # Missile collides with target (terminating condition)
             elif missile.collides_with(self.target) and missile.fired_in_zone == True and missile.target == self.target:
                 step_info["hit_ids"].append(missile.id)
                 step_info["shoot_act"] = True
-                step_info["hit_rewards"].append(self.reward_missile_hit_target)
-                step_info["dhit_ind"].append(self.rind_missile_hit_target)
+                step_info["hit_rewards"].append(self.REWARD_MISSILE_HIT_TARGET)
+                step_info["dhit_ind"].append(self.RIND_MISSILE_HIT_TARGET)
                 self.player.missiles.remove(missile)
                 terminated = True
                 break
@@ -376,31 +408,31 @@ class DogFightEnv(gym.Env):
                 p_hit_by_missile = True
         # The player collides with the enemy (terminating condition)
         if p_hit_by_missile or (not self.enemy.dead and self.enemy.collides_with(self.player)):
-            step_info["dreward"][self.rind_player_collides_with_enemy] = self.reward_player_collides_with_enemy
+            step_info["dreward"][self.RIND_PLAYER_COLLIDES_WITH_ENEMY] = self.REWARD_PLAYER_COLLIDES_WITH_ENEMY
             terminated = True
         else:
             if p_oob:
-                step_info["dreward"][self.rind_player_leaves_game] = self.reward_player_leaves_game
+                step_info["dreward"][self.RIND_PLAYER_LEAVES_GAME] = self.REWARD_PLAYER_LEAVES_GAME
             # Constant negative reward to encourage the agent to finish sooner
             if p_shot_at_nothing:
-                step_info["dreward"][self.rind_missile_miss] = self.reward_missile_miss
-            step_info["dreward"][self.rind_time_penalty] = self.reward_time_penalty
+                step_info["dreward"][self.RIND_MISSILE_MISS] = self.REWARD_MISSILE_MISS
+            step_info["dreward"][self.RIND_TIME_PENALTY] = self.REWARD_TIME_PENALTY
             dist_to_target = self.player.distance_to(self.target)
             if dist_to_target < self.player_last_dist:
-                step_info["dreward"][self.rind_approach_target] = self.reward_approach_target
+                step_info["dreward"][self.RIND_APPROACH_TARGET] = self.REWARD_APPROACH_TARGET
             self.player_last_dist = dist_to_target
         # ================================================================================
 
-        if self.render_mode == "human":
+        if self.RENDER_MODE == "human":
             self.render()
 
         # Prepare to return the observations in a normalized manner
-        px_norm = self.player.x / self.max_x
-        py_norm = self.player.y / self.max_y
+        px_norm = self.player.x / self.MAX_X
+        py_norm = self.player.y / self.MAX_Y
         tdx = self.target.x - self.player.x
         tdy = self.target.y - self.player.y
         ta_norm = np.arctan2(tdy, tdx) / np.pi
-        td_norm = self.player.distance_to(self.target) / self.max_d
+        td_norm = self.player.distance_to(self.target) / self.MAX_D
         if self.enemy.dead or self.player.distance_to(self.enemy) > self.player.observation_range:
             enemy_visible = 0.
             ea_norm = 0.
@@ -410,7 +442,7 @@ class DogFightEnv(gym.Env):
             edx = self.enemy.x - self.player.x
             edy = self.enemy.y - self.player.y
             ea_norm = np.arctan2(edy, edx) / np.pi
-            ed_norm = self.player.distance_to(self.enemy) / self.max_d
+            ed_norm = self.player.distance_to(self.enemy) / self.MAX_D
         if self.enemy.missile is None or self.player.distance_to(self.enemy.missile) > self.player.observation_range:
             enemy_missile_visible = 0.
             ema_norm = 0.
@@ -420,7 +452,7 @@ class DogFightEnv(gym.Env):
             emdx = self.enemy.missile.x - self.player.x
             emdy = self.enemy.missile.y - self.player.y
             ema_norm = np.arctan2(emdy, emdx) / np.pi
-            emd_norm = self.player.distance_to(self.enemy.missile) / self.max_d
+            emd_norm = self.player.distance_to(self.enemy.missile) / self.MAX_D
 
         self.state = (
             px_norm,
@@ -435,15 +467,8 @@ class DogFightEnv(gym.Env):
             emd_norm
         )
 
-        # Check if we reached the maximum episode time limit and terminate if so
-        if self.rewind_counter > 0:
-            self.rewind_counter -= 1
-            step_info["dreward"] = [0] * self.n_reward_components
-            step_info["shoot_act"] = False
-            return np.array(self.state, dtype = np.float64), 0, False, False, step_info
-
         self.step_count += 1
-        truncated = (self.step_count >= self.step_limit)
+        truncated = (self.step_count >= self.STEP_LIMIT)
 
         reward = sum(step_info["dreward"])
         return np.array(self.state, dtype = np.float64), reward, terminated, truncated, step_info
@@ -451,64 +476,80 @@ class DogFightEnv(gym.Env):
     # Environment reset
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed = seed)
+
+        # Reset the state
+        self.counterfactual_trajectories = []
+        self.prop_cfact_trajectories = []
+        self.reset_start = True
+        self.state = None
+        self.perform_split_facts = False
+        self.draw_actions = False
+        self.rewind = False
+
+        self.player = None
+        self.enemy = None
+        self.target = None
+
         self.step_count = 0
+        self.player_last_dist = np.finfo(np.float64).max
         self.paused = False
-        self.traj_lines = None
-        self.rewind_counter = 0
+        self.player_missile_id_counter = 0
+
+        self.action = None
+        self.player_starting_pos = None
 
         # Initialize the player agent
         self.player = Player(
-            self.origin[0],
-            self.origin[1],
-            speed = self.player_min_speed,
+            self.ORIGIN[0],
+            self.ORIGIN[1],
+            speed = self.PLAYER_MIN_SPEED,
             angle = 0.5 * np.pi,
-            min_speed = self.player_min_speed,
-            max_speed = self.player_max_speed,
-            min_turn_rate = self.player_min_turn_rate,
-            max_turn_rate = self.player_max_turn_rate,
-            radius = self.player_radius,
-            observation_range = self.player_observation_range,
+            min_speed = self.PLAYER_MIN_SPEED,
+            max_speed = self.PLAYER_MAX_SPEED,
+            min_turn_rate = self.PLAYER_MIN_TURN_RATE,
+            max_turn_rate = self.PLAYER_MAX_TURN_RATE,
+            radius = self.PLAYER_RADIUS,
+            observation_range = self.PLAYER_OBSERVATION_RANGE,
             prev_move_dir = 1
         )
 
         # Initialize the enemy somewhere outside the player's detection range
         exy = [self.player.x, self.player.y]
         while self.player.distance_to(exy) < self.player.observation_range:
-            exy[0] = np.random.uniform(self.world_area[0], self.world_area[0] + self.world_area[2])
-            exy[1] = np.random.uniform(self.world_area[1], self.world_area[1] + self.world_area[3])
+            exy[0] = np.random.uniform(self.WORLD_AREA[0], self.WORLD_AREA[0] + self.WORLD_AREA[2])
+            exy[1] = np.random.uniform(self.WORLD_AREA[1], self.WORLD_AREA[1] + self.WORLD_AREA[3])
         self.enemy = Enemy(
             exy[0],
             exy[1],
             angle = np.random.uniform(-np.pi, np.pi),
-            speed = self.enemy_min_speed,
-            min_speed = self.enemy_min_speed,
-            max_speed = self.enemy_max_speed,
-            min_turn_rate = self.enemy_min_turn_rate,
-            max_turn_rate = self.enemy_max_turn_rate,
-            radius = self.enemy_radius,
-            observation_range = self.enemy_observation_range,
-            fov = self.enemy_firing_fov
+            speed = self.ENEMY_MIN_SPEED,
+            min_speed = self.ENEMY_MIN_SPEED,
+            max_speed = self.ENEMY_MAX_SPEED,
+            min_turn_rate = self.ENEMY_MIN_TURN_RATE,
+            max_turn_rate = self.ENEMY_MAX_TURN_RATE,
+            radius = self.ENEMY_RADIUS,
+            observation_range = self.ENEMY_OBSERVATION_RANGE,
         )
         self.enemy.angle = self.enemy.angle_to(self.player)
 
         # Initialize the target somewhere outside the player's detection range
         txy = [self.player.x, self.player.y]
         while self.player.distance_to(txy) < self.player.observation_range:
-            txy[0] = np.random.uniform(self.world_area[0] + 45, self.world_area[0] + self.world_area[2] - 45)
-            txy[1] = np.random.uniform(self.world_area[1] + 45, self.world_area[1] + self.world_area[3] - 45)
+            txy[0] = np.random.uniform(self.WORLD_AREA[0] + 45, self.WORLD_AREA[0] + self.WORLD_AREA[2] - 45)
+            txy[1] = np.random.uniform(self.WORLD_AREA[1] + 45, self.WORLD_AREA[1] + self.WORLD_AREA[3] - 45)
         self.target = Entity(
             txy[0],
             txy[1],
-            radius = self.target_radius
+            radius = self.TARGET_RADIUS
         )
 
         # Prepare to return the observations in a normalized manner
-        px_norm = self.player.x / self.max_x
-        py_norm = self.player.y / self.max_y
+        px_norm = self.player.x / self.MAX_X
+        py_norm = self.player.y / self.MAX_Y
         tdx = self.target.x - self.player.x
         tdy = self.target.y - self.player.y
         ta_norm = np.arctan2(tdy, tdx) / np.pi
-        td_norm = self.player.distance_to(self.target) / self.max_d
+        td_norm = self.player.distance_to(self.target) / self.MAX_D
 
         self.state = (
             px_norm,
@@ -523,14 +564,12 @@ class DogFightEnv(gym.Env):
             0.
         )
 
-        self.player_last_dist = self.player.distance_to(self.target)
-
-        self.reset_start = True
-        if self.render_mode == "human":
+        if self.RENDER_MODE == "human":
             self.render()
+
         self.reset_start = False
 
-        return np.array(self.state, dtype = np.float64), {"dreward" : [0] * self.n_reward_components}
+        return np.array(self.state, dtype = np.float64), {"dreward" : [0] * self.N_REWARD_COMPONENTS}
 
     def _get_jet_vertices(self, jet):
         jet_vertices = [
@@ -554,167 +593,327 @@ class DogFightEnv(gym.Env):
     # transparent shape, or else they will not blend together properly
     # when blitted to the lower surface or directly to the screen
     def render(self):
-        if self.render_mode is None:
+        if self.RENDER_MODE is None:
             gym.logger.warn(
                 "Env render method called without specified render mode"
             )
             return
 
-        rewind = False
         # Initialize screen with PyGame
-        if self.screen is None:
+        if self.SCREEN is None:
             pygame.init()
-            if self.render_mode == "human":
+            if self.RENDER_MODE == "human":
                 pygame.display.init()
-                self.screen = pygame.display.set_mode(self.screen_size)
+                self.SCREEN = pygame.display.set_mode(self.SCREEN_SIZE)
             else:
-                self.screen = pygame.Surface(self.screen_size)
-            self.lower_surface = pygame.Surface(self.screen_size)
-            self.shadow_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
-            self.pobs_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
-            self.zone_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
-            self.tghost_surface = pygame.Surface(self.screen_size, pygame.SRCALPHA)
-        if self.clock is None:
-            self.clock = pygame.time.Clock()
+                self.SCREEN = pygame.Surface(self.SCREEN_SIZE)
+
+            self.lower_surface   = pygame.Surface(self.SCREEN_SIZE)
+            self.pobs_surface    = pygame.Surface(self.SCREEN_SIZE, pygame.SRCALPHA)
+            self.eobs_surface    = pygame.Surface(self.SCREEN_SIZE, pygame.SRCALPHA)
+            self.zone_surface    = pygame.Surface(self.SCREEN_SIZE, pygame.SRCALPHA)
+            self.factual_surface = pygame.Surface(self.SCREEN_SIZE, pygame.SRCALPHA)
+            self.factual_surface.fill(self.COLOR_CLEAR_ALPHA)
+
+            if self.CLOCK is None:
+                self.CLOCK = pygame.time.Clock()
 
         # Reset / clear the surfaces each frame
-        self.lower_surface.fill(self.color_black)
-        self.shadow_surface.fill(self.color_black)
-        self.zone_surface.fill(self.color_clear)
-        self.tghost_surface.fill(self.color_black)
-        self.pobs_surface.fill(self.color_clear)
+        if not self.perform_split_facts:
+            self.lower_surface.fill(self.COLOR_GRAY)
+            self.pobs_surface.fill(self.COLOR_CLEAR_ALPHA)
+            self.eobs_surface.fill(self.COLOR_CLEAR_ALPHA)
+            self.zone_surface.fill(self.COLOR_CLEAR_ALPHA)
 
-        # Draw the target firing zone and the target itself at the bottom of
-        # the screen since it is considered a ground target
-        pygame.draw.circle(
-            self.zone_surface,
-            self.color_gray,
-            (self.target.x, self.target.y),
-            self.target_opening_range
-        )
-        self.lower_surface.blit(self.zone_surface, (0, 0))
-        # Draw the target
-        pygame.draw.circle(
-            self.lower_surface,
-            self.color_blue,
-            (self.target.x, self.target.y),
-            self.target.radius
-        )
-
-        # Draw the jets
-        for jet in [self.player, self.enemy]:
-            if jet == self.player or (jet == self.enemy and not self.enemy.dead):
-                jet_vertices = self._get_jet_vertices(jet)
-                color = self.color_green if jet is self.player else self.color_red
-                pygame.draw.polygon(self.lower_surface, color, jet_vertices)
-
-        # Draw enemy missile
-        if self.enemy.missile is not None:
+            # Draw the target firing zone and the target itself at the bottom of
+            # the screen since it is considered a ground target
+            pygame.draw.circle(
+                self.zone_surface,
+                self.COLOR_BLUE_ALPHA,
+                (self.target.x, self.target.y),
+                self.TARGET_OPENING_RANGE
+            )
+            self.lower_surface.blit(self.zone_surface, (0, 0))
+            # Draw the target
             pygame.draw.circle(
                 self.lower_surface,
-                self.color_orange,
-                (self.enemy.missile.x, self.enemy.missile.y),
-                self.enemy.missile.radius
+                self.COLOR_BLUE,
+                (self.target.x, self.target.y),
+                self.target.radius
             )
 
-        # Draw the "shadow" to simulate the player's limited observation range
-        pygame.draw.circle(self.shadow_surface, self.color_gray, (self.target.x, self.target.y), self.target_opening_range)
-        pygame.draw.circle(self.shadow_surface, self.color_blue, (self.target.x, self.target.y), self.target.radius)
-        pygame.draw.circle(self.pobs_surface, self.color_black, (self.player.x, self.player.y), self.player_observation_range)
-        self.shadow_surface.blit(self.pobs_surface, (0, 0), special_flags = pygame.BLEND_RGBA_SUB)
-        self.lower_surface.blit(self.shadow_surface, (0, 0))
-
-        # Draw the player missiles
-        for missile in self.player.missiles:
+            # Draw enemy then player obs. ranges
+            if not self.enemy.dead:
+                pygame.draw.circle(
+                    self.eobs_surface,
+                    self.COLOR_RED_ALPHA,
+                    (self.enemy.x, self.enemy.y),
+                    self.enemy.observation_range
+                )
+                self.lower_surface.blit(self.eobs_surface, (0, 0))
             pygame.draw.circle(
-                self.lower_surface,
-                self.color_white,
-                (missile.x, missile.y),
-                missile.radius
+                self.pobs_surface,
+                self.COLOR_GREEN_ALPHA,
+                (self.player.x, self.player.y),
+                self.player.observation_range
             )
+            self.lower_surface.blit(self.pobs_surface, (0, 0))
 
-        lower_flip_surf = pygame.transform.flip(self.lower_surface, False, True)
-        self.screen.blit(lower_flip_surf, (0, 0))
+            # Draw the jets
+            for jet in [self.player, self.enemy]:
+                if jet == self.player or (jet == self.enemy and not self.enemy.dead):
+                    jet_vertices = self._get_jet_vertices(jet)
+                    color = self.COLOR_GREEN if jet is self.player else self.COLOR_RED
+                    pygame.draw.polygon(self.lower_surface, color, jet_vertices)
+
+            # Draw enemy missile
+            if self.enemy.missile is not None:
+                pygame.draw.circle(
+                    self.lower_surface,
+                    self.COLOR_RED,
+                    (self.enemy.missile.x, self.enemy.missile.y),
+                    self.enemy.missile.radius
+                )
+
+            # Draw the player missiles
+            for missile in self.player.missiles:
+                pygame.draw.circle(
+                    self.lower_surface,
+                    self.COLOR_GREEN,
+                    (missile.x, missile.y),
+                    missile.radius
+                )
+
+            lower_flip_surf = pygame.transform.flip(self.lower_surface, False, True)
+            self.SCREEN.blit(lower_flip_surf, (0, 0))
 
         # PyGame event handling and timing
-        if self.render_mode == "human":
-            if self.paused and self.eval_mode:
-                if self.traj_lines is not None:
-                    for idx, point_pair in enumerate(self.traj_lines):
+        if self.RENDER_MODE == "human":
+            if self.paused and self.EVAL_MODE and not self.rewind:
+                if self.prop_cfact_trajectories:
+                    for idx, point_pair in enumerate(self.prop_cfact_trajectories):
                         pygame.draw.line(
-                            self.screen,
-                            self.rainbow_colors[idx % len(self.rainbow_colors)],
+                            self.SCREEN,
+                            self.COLOR_WHITE,
                             point_pair[0],
                             point_pair[1],
-                            3
+                            2
                         )
+                        if point_pair[2] == self.TRAJ_SHOOT_ENEMY:
+                            pygame.draw.circle(
+                                self.SCREEN,
+                                self.COLOR_RED,
+                                point_pair[1],
+                                0.35 * self.PLAYER_RADIUS
+                            )
+                        if point_pair[2] == self.TRAJ_SHOOT_TARGET:
+                            pygame.draw.circle(
+                                self.SCREEN,
+                                self.COLOR_BLUE,
+                                point_pair[1],
+                                0.35 * self.PLAYER_RADIUS
+                            )
+#            elif not self.perform_split_facts:
             else:
-                self.traj_lines = None
+                self.counterfactual_trajectories = []
+                self.prop_cfact_trajectories = []
 
+#            if self.draw_actions:
+            if self.perform_split_facts:
+                pygame.draw.line(
+                    self.SCREEN,
+                    self.COLOR_BLACK,
+                    (self.player_starting_pos[0], self.MAX_Y - self.player_starting_pos[1]),
+                    (self.player.x, self.MAX_Y - self.player.y),
+                    2
+                )
+                if self.action == self.ACTION_SHOOT_ENEMY:
+                    pygame.draw.circle(
+                        self.SCREEN,
+                        self.COLOR_RED,
+                        (self.player.x, self.MAX_Y - self.player.y),
+                        0.35 * self.PLAYER_RADIUS
+                    )
+                elif self.action == self.ACTION_SHOOT_TARGET:
+                    pygame.draw.circle(
+                        self.SCREEN,
+                        self.COLOR_BLUE,
+                        (self.player.x, self.MAX_Y - self.player.y),
+                        0.35 * self.PLAYER_RADIUS
+                    )
+#                factual_surface_flip = pygame.transform.flip(self.lower_surface, False, True)
+#                self.SCREEN.blit(factual_surface_flip, (0, 0))
             for event in pygame.event.get():
-                if self.eval_mode:
+                if self.EVAL_MODE and not self.perform_split_facts:
                     if event.type == pygame.KEYDOWN and not self.reset_start:
                         if event.key == pygame.K_SPACE:
                             self.paused = not self.paused
+                        elif event.key == pygame.K_RETURN:
+                            if len(self.counterfactual_trajectories) > 0:
+                                self.perform_split_facts = True
+#                                self.paused = False
+#                            print(f"counterfactual trajectory:\n{self.counterfactual_trajectories}")
+                        elif event.key == pygame.K_x and self.prop_cfact_trajectories:
+                            tmp = self.prop_cfact_trajectories.pop()
+                            if tmp[2] == self.TRAJ_MOVE:
+                                ny = round(abs(tmp[1][1] - tmp[0][1]) / (self.player.speed * self.TAU))
+                                nx = round(abs(tmp[1][0] - tmp[0][0]) / (self.player.speed * self.TAU))
+                                for i in range(max(nx, ny)):
+                                    self.counterfactual_trajectories.pop()
+                            else:
+                                self.counterfactual_trajectories.pop()
+                        elif event.key == pygame.K_e or event.key == pygame.K_t:
+                            if not self.prop_cfact_trajectories:
+                                pp0 = (self.player.x, self.MAX_Y - self.player.y)
+                            else:
+                                pp0 = (self.prop_cfact_trajectories[-1][1][0], self.prop_cfact_trajectories[-1][1][1])
+
+                            if self.prop_cfact_trajectories:
+                                if self.prop_cfact_trajectories[-1][2] == self.TRAJ_SHOOT_ENEMY or self.prop_cfact_trajectories[-1][2] == self.TRAJ_SHOOT_TARGET:
+                                    if len(self.prop_cfact_trajectories) == 1:
+                                        if self.player.prev_move_dir == self.ACTION_LEFT or self.player.prev_move_dir == self.ACTION_RIGHT:
+                                            xmul = [-1, 1][self.player.prev_move_dir - self.ACTION_LEFT]
+                                        else:
+                                            xmul = 0
+                                        if self.player.prev_move_dir == self.ACTION_DOWN or self.player.prev_move_dir == self.ACTION_UP:
+                                            ymul = [1, -1][self.player.prev_move_dir - self.ACTION_DOWN]
+                                        else:
+                                            ymul = 0
+                                    else:
+                                        if (
+                                            self.prop_cfact_trajectories[-2][1][0] == self.prop_cfact_trajectories[-2][0][0] and
+                                            self.prop_cfact_trajectories[-2][1][1] == self.prop_cfact_trajectories[-2][0][1]
+                                        ):
+                                            lkbk = -1
+                                        else:
+                                            lkbk = -2
+                                        if self.prop_cfact_trajectories[lkbk][1][0] == self.prop_cfact_trajectories[lkbk][0][0]:
+                                            xmul = 0
+                                            ymul = np.sign(self.prop_cfact_trajectories[lkbk][1][1] - self.prop_cfact_trajectories[lkbk][0][1])
+                                        elif self.prop_cfact_trajectories[lkbk][1][1] == self.prop_cfact_trajectories[lkbk][0][1]:
+                                            xmul = np.sign(self.prop_cfact_trajectories[lkbk][1][0] - self.prop_cfact_trajectories[lkbk][0][0])
+                                            ymul = 0
+                                else:
+                                    xmul = 0
+                                    ymul = 0
+                            else:
+                                xmul = 0
+                                ymul = 0
+
+                            dx = self.player.speed * self.TAU * xmul
+                            dy = self.player.speed * self.TAU * ymul
+                            if abs(dy) > abs(dx):
+                                if not self.prop_cfact_trajectories:
+                                    pp1 = (self.player.x, self.MAX_Y - self.player.y + dy)
+                                else:
+                                    pp1 = (self.prop_cfact_trajectories[-1][1][0], self.prop_cfact_trajectories[-1][1][1] + dy)
+                            else:
+                                if not self.prop_cfact_trajectories:
+                                    pp1 = (self.player.x + dx, self.MAX_Y - self.player.y)
+                                else:
+                                    pp1 = (self.prop_cfact_trajectories[-1][1][0] + dx, self.prop_cfact_trajectories[-1][1][1])
+
+                            if event.key == pygame.K_t:
+                                self.counterfactual_trajectories.append(self.ACTION_SHOOT_TARGET)
+#                                print("Requires shooting target")
+                            else:
+                                self.counterfactual_trajectories.append(self.ACTION_SHOOT_ENEMY)
+#                                print("Requires shooting enemy")
+                            self.prop_cfact_trajectories.append((pp0, pp1, self.TRAJ_SHOOT_TARGET if event.key == pygame.K_t else self.TRAJ_SHOOT_ENEMY))
+
+                        elif event.key == pygame.K_c:
+                            self.prop_cfact_trajectories = []
+                            self.counterfactual_trajectories = []
+
                     elif event.type == pygame.MOUSEBUTTONDOWN and not self.reset_start:
                         if event.button == 1:
-                            if self.traj_lines is None:
-                                pp0 = (self.player.x, self.max_y - self.player.y)
+                            if not self.prop_cfact_trajectories:
+                                pp0 = (self.player.x, self.MAX_Y - self.player.y)
                             else:
-                                pp0 = (self.traj_lines[-1][1][0], self.traj_lines[-1][1][1])
+                                pp0 = (self.prop_cfact_trajectories[-1][1][0], self.prop_cfact_trajectories[-1][1][1])
 
-                            xmul = round((event.pos[0] - pp0[0]) / (self.player.speed * self.tau))
-                            ymul = round((event.pos[1] - pp0[1]) / (self.player.speed * self.tau))
-                            dx = self.player.speed * self.tau * xmul
-                            dy = self.player.speed * self.tau * ymul
+                            xmul = round((event.pos[0] - pp0[0]) / (self.player.speed * self.TAU))
+                            ymul = round((event.pos[1] - pp0[1]) / (self.player.speed * self.TAU))
+
+                            dx = self.player.speed * self.TAU * xmul
+                            dy = self.player.speed * self.TAU * ymul
                             if abs(dy) > abs(dx):
-                                if self.traj_lines is None:
-                                    pp1 = (self.player.x, self.max_y - self.player.y + dy)
+                                if not self.prop_cfact_trajectories:
+                                    pp1 = (self.player.x, self.MAX_Y - self.player.y + dy)
                                 else:
-                                    pp1 = (self.traj_lines[-1][1][0], self.traj_lines[-1][1][1] + dy)
+                                    pp1 = (self.prop_cfact_trajectories[-1][1][0], self.prop_cfact_trajectories[-1][1][1] + dy)
                             else:
-                                if self.traj_lines is None:
-                                    pp1 = (self.player.x + dx, self.max_y - self.player.y)
+                                if not self.prop_cfact_trajectories:
+                                    pp1 = (self.player.x + dx, self.MAX_Y - self.player.y)
                                 else:
-                                    pp1 = (self.traj_lines[-1][1][0] + dx, self.traj_lines[-1][1][1])
+                                    pp1 = (self.prop_cfact_trajectories[-1][1][0] + dx, self.prop_cfact_trajectories[-1][1][1])
 
                             if abs(xmul) > 0 or abs(ymul) > 0:
-                                if self.traj_lines is None:
-                                    self.traj_lines = []
-                                self.traj_lines.append((pp0, pp1))
-                        else:
-                            if self.traj_lines is not None:
-                                self.traj_lines.pop()
-                                if len(self.traj_lines) == 0:
-                                    self.traj_lines = None
+                                if abs(dy) > abs(dx):
+#                                    print(f"Requires going {abs(ymul)} steps {'up' if ymul < 0 else 'down'}")
+                                    self.counterfactual_trajectories += [self.ACTION_UP if ymul < 0 else self.ACTION_DOWN] * abs(ymul)
+                                else:
+#                                    print(f"Requires going {abs(xmul)} steps {'left' if xmul < 0 else 'right'}")
+                                    self.counterfactual_trajectories += [self.ACTION_LEFT if xmul < 0 else self.ACTION_RIGHT] * abs(xmul)
+                                self.prop_cfact_trajectories.append((pp0, pp1, self.TRAJ_MOVE))
+
             keys = pygame.key.get_pressed()
-            if keys[pygame.K_LEFT] and self.rewind_counter < self.step_count and self.paused:
-                self.traj_lines = None
-                rewind = True
-                self.rewind_counter += 1
+            self.rewind = self.EVAL_MODE and self.paused and not self.perform_split_facts and keys[pygame.K_r]
 
             pygame.display.flip()
-            self.clock.tick(self.metadata["render_fps"])
-            return rewind
+            self.CLOCK.tick(self.metadata["render_fps"])
 
     # Close the environment
     def close(self):
-        if self.screen is not None:
+        if self.SCREEN is not None:
             pygame.display.quit()
             pygame.quit()
 
+#        self.counterfactual_trajectories = []
+#        self.prop_cfact_trajectories = []
+#        self.reset_start = True
+#        self.state = None
+#        self.perform_split_facts = False
+#        self.draw_actions = False
+#
+#        self.player = None
+#        self.enemy = None
+#        self.target = None
+#
+#        self.step_count = 0
+#        self.player_last_dist = np.finfo(np.float64).max
+#        self.paused = False
+#        self.player_missile_id_counter = 0
+#
+#        self.lower_surface   = None
+#        self.pobs_surface    = None
+#        self.eobs_surface    = None
+#        self.zone_surface    = None
+#        self.factual_surface = None
+#
+#        self.action = None
+#        self.player_starting_pos = None
+
     def get_state(self):
         state_dict = {
-            "player" : deepcopy(self.player),
-            "enemy"  : deepcopy(self.enemy),
-            "target" : deepcopy(self.target)
+            "state"             : deepcopy(self.state),
+            "player"            : deepcopy(self.player),
+            "enemy"             : deepcopy(self.enemy),
+            "target"            : deepcopy(self.target),
+            "step_count"        : self.step_count,
+            "player_last_dist"  : self.player_last_dist,
+            "player_missile_id" : self.player_missile_id_counter
         }
         return state_dict
 
     def set_state(self, state_dict):
-        self.player = state_dict["player"]
-        self.enemy = state_dict["enemy"]
-        self.target = state_dict["target"]
+        self.state = deepcopy(state_dict["state"])
+        self.player = deepcopy(state_dict["player"])
+        self.enemy = deepcopy(state_dict["enemy"])
+        self.target = deepcopy(state_dict["target"])
+        self.step_count = state_dict["step_count"]
+        self.player_last_dist = state_dict["player_last_dist"]
+        self.player_missile_id_counter = state_dict["player_missile_id"]
 
 # More generic entity class for the game
 class Entity():
@@ -955,9 +1154,9 @@ class Player(Jet):
 
     def move(self, tau, action):
         if action == 0:
-            self.y += self.speed * tau
-        elif action == 1:
             self.y -= self.speed * tau
+        elif action == 1:
+            self.y += self.speed * tau
         elif action == 2:
             self.x -= self.speed * tau
         else:
