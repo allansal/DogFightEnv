@@ -207,10 +207,11 @@ class DogFightEnv(gym.Env):
         # ====================================================================
         self.counterfactual_trajectories = []
         self.prop_cfact_trajectories = []
+        self.prop_tfact_trajectories = []
         self.reset_start = True
         self.state = None
         self.perform_split_facts = False
-        self.draw_actions = False
+#        self.draw_actions = False
         self.rewind = False
 
         self.player = None
@@ -480,10 +481,11 @@ class DogFightEnv(gym.Env):
         # Reset the state
         self.counterfactual_trajectories = []
         self.prop_cfact_trajectories = []
+        self.prop_tfact_trajectories = []
         self.reset_start = True
         self.state = None
         self.perform_split_facts = False
-        self.draw_actions = False
+#        self.draw_actions = False
         self.rewind = False
 
         self.player = None
@@ -613,79 +615,80 @@ class DogFightEnv(gym.Env):
             self.eobs_surface    = pygame.Surface(self.SCREEN_SIZE, pygame.SRCALPHA)
             self.zone_surface    = pygame.Surface(self.SCREEN_SIZE, pygame.SRCALPHA)
             self.factual_surface = pygame.Surface(self.SCREEN_SIZE, pygame.SRCALPHA)
-            self.factual_surface.fill(self.COLOR_CLEAR_ALPHA)
 
             if self.CLOCK is None:
                 self.CLOCK = pygame.time.Clock()
 
         # Reset / clear the surfaces each frame
-        if not self.perform_split_facts:
-            self.lower_surface.fill(self.COLOR_GRAY)
-            self.pobs_surface.fill(self.COLOR_CLEAR_ALPHA)
-            self.eobs_surface.fill(self.COLOR_CLEAR_ALPHA)
-            self.zone_surface.fill(self.COLOR_CLEAR_ALPHA)
+#        if not self.paused:
+        self.factual_surface.fill(self.COLOR_CLEAR_ALPHA)
+#        if not self.perform_split_facts:
+        self.lower_surface.fill(self.COLOR_GRAY)
+        self.pobs_surface.fill(self.COLOR_CLEAR_ALPHA)
+        self.eobs_surface.fill(self.COLOR_CLEAR_ALPHA)
+        self.zone_surface.fill(self.COLOR_CLEAR_ALPHA)
 
-            # Draw the target firing zone and the target itself at the bottom of
-            # the screen since it is considered a ground target
+        # Draw the target firing zone and the target itself at the bottom of
+        # the screen since it is considered a ground target
+        pygame.draw.circle(
+            self.zone_surface,
+            self.COLOR_BLUE_ALPHA,
+            (self.target.x, self.target.y),
+            self.TARGET_OPENING_RANGE
+        )
+        self.lower_surface.blit(self.zone_surface, (0, 0))
+        # Draw the target
+        pygame.draw.circle(
+            self.lower_surface,
+            self.COLOR_BLUE,
+            (self.target.x, self.target.y),
+            self.target.radius
+        )
+
+        # Draw enemy then player obs. ranges
+        if not self.enemy.dead:
             pygame.draw.circle(
-                self.zone_surface,
-                self.COLOR_BLUE_ALPHA,
-                (self.target.x, self.target.y),
-                self.TARGET_OPENING_RANGE
+                self.eobs_surface,
+                self.COLOR_RED_ALPHA,
+                (self.enemy.x, self.enemy.y),
+                self.enemy.observation_range
             )
-            self.lower_surface.blit(self.zone_surface, (0, 0))
-            # Draw the target
+            self.lower_surface.blit(self.eobs_surface, (0, 0))
+        pygame.draw.circle(
+            self.pobs_surface,
+            self.COLOR_GREEN_ALPHA,
+            (self.player.x, self.player.y),
+            self.player.observation_range
+        )
+        self.lower_surface.blit(self.pobs_surface, (0, 0))
+
+        # Draw the jets
+        for jet in [self.player, self.enemy]:
+            if jet == self.player or (jet == self.enemy and not self.enemy.dead):
+                jet_vertices = self._get_jet_vertices(jet)
+                color = self.COLOR_GREEN if jet is self.player else self.COLOR_RED
+                pygame.draw.polygon(self.lower_surface, color, jet_vertices)
+
+        # Draw enemy missile
+        if self.enemy.missile is not None:
             pygame.draw.circle(
                 self.lower_surface,
-                self.COLOR_BLUE,
-                (self.target.x, self.target.y),
-                self.target.radius
+                self.COLOR_RED,
+                (self.enemy.missile.x, self.enemy.missile.y),
+                self.enemy.missile.radius
             )
 
-            # Draw enemy then player obs. ranges
-            if not self.enemy.dead:
-                pygame.draw.circle(
-                    self.eobs_surface,
-                    self.COLOR_RED_ALPHA,
-                    (self.enemy.x, self.enemy.y),
-                    self.enemy.observation_range
-                )
-                self.lower_surface.blit(self.eobs_surface, (0, 0))
+        # Draw the player missiles
+        for missile in self.player.missiles:
             pygame.draw.circle(
-                self.pobs_surface,
-                self.COLOR_GREEN_ALPHA,
-                (self.player.x, self.player.y),
-                self.player.observation_range
+                self.lower_surface,
+                self.COLOR_GREEN,
+                (missile.x, missile.y),
+                missile.radius
             )
-            self.lower_surface.blit(self.pobs_surface, (0, 0))
 
-            # Draw the jets
-            for jet in [self.player, self.enemy]:
-                if jet == self.player or (jet == self.enemy and not self.enemy.dead):
-                    jet_vertices = self._get_jet_vertices(jet)
-                    color = self.COLOR_GREEN if jet is self.player else self.COLOR_RED
-                    pygame.draw.polygon(self.lower_surface, color, jet_vertices)
-
-            # Draw enemy missile
-            if self.enemy.missile is not None:
-                pygame.draw.circle(
-                    self.lower_surface,
-                    self.COLOR_RED,
-                    (self.enemy.missile.x, self.enemy.missile.y),
-                    self.enemy.missile.radius
-                )
-
-            # Draw the player missiles
-            for missile in self.player.missiles:
-                pygame.draw.circle(
-                    self.lower_surface,
-                    self.COLOR_GREEN,
-                    (missile.x, missile.y),
-                    missile.radius
-                )
-
-            lower_flip_surf = pygame.transform.flip(self.lower_surface, False, True)
-            self.SCREEN.blit(lower_flip_surf, (0, 0))
+#        lower_flip_surf = pygame.transform.flip(self.lower_surface, False, True)
+#        self.SCREEN.blit(lower_flip_surf, (0, 0))
 
         # PyGame event handling and timing
         if self.RENDER_MODE == "human":
@@ -693,7 +696,8 @@ class DogFightEnv(gym.Env):
                 if self.prop_cfact_trajectories:
                     for idx, point_pair in enumerate(self.prop_cfact_trajectories):
                         pygame.draw.line(
-                            self.SCREEN,
+#                            self.SCREEN,
+                            self.factual_surface,
                             self.COLOR_WHITE,
                             point_pair[0],
                             point_pair[1],
@@ -701,14 +705,42 @@ class DogFightEnv(gym.Env):
                         )
                         if point_pair[2] == self.TRAJ_SHOOT_ENEMY:
                             pygame.draw.circle(
-                                self.SCREEN,
+#                                self.SCREEN,
+                                self.factual_surface,
                                 self.COLOR_RED,
                                 point_pair[1],
                                 0.35 * self.PLAYER_RADIUS
                             )
                         if point_pair[2] == self.TRAJ_SHOOT_TARGET:
                             pygame.draw.circle(
-                                self.SCREEN,
+#                                self.SCREEN,
+                                self.factual_surface,
+                                self.COLOR_BLUE,
+                                point_pair[1],
+                                0.35 * self.PLAYER_RADIUS
+                            )
+                if self.prop_tfact_trajectories:
+                    for idx, point_pair in enumerate(self.prop_tfact_trajectories):
+                        pygame.draw.line(
+#                            self.SCREEN,
+                            self.factual_surface,
+                            self.COLOR_BLACK,
+                            point_pair[0],
+                            point_pair[1],
+                            2
+                        )
+                        if point_pair[2] == self.TRAJ_SHOOT_ENEMY:
+                            pygame.draw.circle(
+#                                self.SCREEN,
+                                self.factual_surface,
+                                self.COLOR_RED,
+                                point_pair[1],
+                                0.35 * self.PLAYER_RADIUS
+                            )
+                        if point_pair[2] == self.TRAJ_SHOOT_TARGET:
+                            pygame.draw.circle(
+#                                self.SCREEN,
+                                self.factual_surface,
                                 self.COLOR_BLUE,
                                 point_pair[1],
                                 0.35 * self.PLAYER_RADIUS
@@ -717,30 +749,46 @@ class DogFightEnv(gym.Env):
             else:
                 self.counterfactual_trajectories = []
                 self.prop_cfact_trajectories = []
+                self.prop_tfact_trajectories = []
 
 #            if self.draw_actions:
             if self.perform_split_facts:
-                pygame.draw.line(
-                    self.SCREEN,
-                    self.COLOR_BLACK,
-                    (self.player_starting_pos[0], self.MAX_Y - self.player_starting_pos[1]),
-                    (self.player.x, self.MAX_Y - self.player.y),
-                    2
-                )
                 if self.action == self.ACTION_SHOOT_ENEMY:
-                    pygame.draw.circle(
-                        self.SCREEN,
-                        self.COLOR_RED,
-                        (self.player.x, self.MAX_Y - self.player.y),
-                        0.35 * self.PLAYER_RADIUS
-                    )
+                    tmp_traj = self.TRAJ_SHOOT_ENEMY
                 elif self.action == self.ACTION_SHOOT_TARGET:
-                    pygame.draw.circle(
-                        self.SCREEN,
-                        self.COLOR_BLUE,
-                        (self.player.x, self.MAX_Y - self.player.y),
-                        0.35 * self.PLAYER_RADIUS
-                    )
+                    tmp_traj = self.TRAJ_SHOOT_TARGET
+                else:
+                    tmp_traj = self.TRAJ_MOVE
+#                self.prop_tfact_trajectories.append((self.player_starting_pos[0], self.player_starting_pos[1]), tmp_traj)
+                self.prop_tfact_trajectories.append(((self.player_starting_pos[0], self.MAX_Y - self.player_starting_pos[1]),
+                                                    (self.player.x, self.MAX_Y - self.player.y),
+                                                    tmp_traj)
+                )
+#                            self.prop_cfact_trajectories.append((pp0, pp1, self.TRAJ_SHOOT_TARGET if event.key == pygame.K_t else self.TRAJ_SHOOT_ENEMY))
+#                pygame.draw.line(
+##                    self.SCREEN,
+#                    self.factual_surface,
+#                    self.COLOR_BLACK,
+#                    (self.player_starting_pos[0], self.MAX_Y - self.player_starting_pos[1]),
+#                    (self.player.x, self.MAX_Y - self.player.y),
+#                    2
+#                )
+#                if self.action == self.ACTION_SHOOT_ENEMY:
+#                    pygame.draw.circle(
+##                        self.SCREEN,
+#                        self.factual_surface,
+#                        self.COLOR_RED,
+#                        (self.player.x, self.MAX_Y - self.player.y),
+#                        0.35 * self.PLAYER_RADIUS
+#                    )
+#                elif self.action == self.ACTION_SHOOT_TARGET:
+#                    pygame.draw.circle(
+##                        self.SCREEN,
+#                        self.factual_surface,
+#                        self.COLOR_BLUE,
+#                        (self.player.x, self.MAX_Y - self.player.y),
+#                        0.35 * self.PLAYER_RADIUS
+#                    )
 #                factual_surface_flip = pygame.transform.flip(self.lower_surface, False, True)
 #                self.SCREEN.blit(factual_surface_flip, (0, 0))
             for event in pygame.event.get():
@@ -760,8 +808,12 @@ class DogFightEnv(gym.Env):
                                 nx = round(abs(tmp[1][0] - tmp[0][0]) / (self.player.speed * self.TAU))
                                 for i in range(max(nx, ny)):
                                     self.counterfactual_trajectories.pop()
+                                    if self.prop_tfact_trajectories:
+                                        self.prop_tfact_trajectories.pop()
                             else:
                                 self.counterfactual_trajectories.pop()
+                                if self.prop_tfact_trajectories:
+                                    self.prop_tfact_trajectories.pop()
                         elif event.key == pygame.K_e or event.key == pygame.K_t:
                             if not self.prop_cfact_trajectories:
                                 pp0 = (self.player.x, self.MAX_Y - self.player.y)
@@ -769,36 +821,46 @@ class DogFightEnv(gym.Env):
                                 pp0 = (self.prop_cfact_trajectories[-1][1][0], self.prop_cfact_trajectories[-1][1][1])
 
                             if self.prop_cfact_trajectories:
-                                if self.prop_cfact_trajectories[-1][2] == self.TRAJ_SHOOT_ENEMY or self.prop_cfact_trajectories[-1][2] == self.TRAJ_SHOOT_TARGET:
-                                    if len(self.prop_cfact_trajectories) == 1:
-                                        if self.player.prev_move_dir == self.ACTION_LEFT or self.player.prev_move_dir == self.ACTION_RIGHT:
-                                            xmul = [-1, 1][self.player.prev_move_dir - self.ACTION_LEFT]
-                                        else:
-                                            xmul = 0
-                                        if self.player.prev_move_dir == self.ACTION_DOWN or self.player.prev_move_dir == self.ACTION_UP:
-                                            ymul = [1, -1][self.player.prev_move_dir - self.ACTION_DOWN]
-                                        else:
-                                            ymul = 0
-                                    else:
-                                        if (
-                                            self.prop_cfact_trajectories[-2][1][0] == self.prop_cfact_trajectories[-2][0][0] and
-                                            self.prop_cfact_trajectories[-2][1][1] == self.prop_cfact_trajectories[-2][0][1]
-                                        ):
-                                            lkbk = -1
-                                        else:
-                                            lkbk = -2
-                                        if self.prop_cfact_trajectories[lkbk][1][0] == self.prop_cfact_trajectories[lkbk][0][0]:
-                                            xmul = 0
-                                            ymul = np.sign(self.prop_cfact_trajectories[lkbk][1][1] - self.prop_cfact_trajectories[lkbk][0][1])
-                                        elif self.prop_cfact_trajectories[lkbk][1][1] == self.prop_cfact_trajectories[lkbk][0][1]:
-                                            xmul = np.sign(self.prop_cfact_trajectories[lkbk][1][0] - self.prop_cfact_trajectories[lkbk][0][0])
-                                            ymul = 0
+#                                if self.prop_cfact_trajectories[-1][2] == self.TRAJ_SHOOT_ENEMY or self.prop_cfact_trajectories[-1][2] == self.TRAJ_SHOOT_TARGET:
+#                                if len(self.prop_cfact_trajectories) == 1:
+#                                    if self.player.prev_move_dir == self.ACTION_LEFT or self.player.prev_move_dir == self.ACTION_RIGHT:
+#                                        xmul = [-1, 1][self.player.prev_move_dir - self.ACTION_LEFT]
+#                                    else:
+#                                        xmul = 0
+#                                    if self.player.prev_move_dir == self.ACTION_DOWN or self.player.prev_move_dir == self.ACTION_UP:
+#                                        ymul = [1, -1][self.player.prev_move_dir - self.ACTION_DOWN]
+#                                    else:
+#                                        ymul = 0
+#                                else:
+                                lkbk = -1
+#                                if (
+#                                    self.prop_cfact_trajectories[-2][1][0] == self.prop_cfact_trajectories[-2][0][0] and
+#                                    self.prop_cfact_trajectories[-2][1][1] == self.prop_cfact_trajectories[-2][0][1]
+#                                ):
+#                                    lkbk = -1
+#                                else:
+#                                    lkbk = -2
+                                if self.prop_cfact_trajectories[lkbk][1][0] == self.prop_cfact_trajectories[lkbk][0][0]:
+                                    xmul = 0
+                                    ymul = np.sign(self.prop_cfact_trajectories[lkbk][1][1] - self.prop_cfact_trajectories[lkbk][0][1])
+#                                elif self.prop_cfact_trajectories[lkbk][1][1] == self.prop_cfact_trajectories[lkbk][0][1]:
+                                else:
+                                    xmul = np.sign(self.prop_cfact_trajectories[lkbk][1][0] - self.prop_cfact_trajectories[lkbk][0][0])
+                                    ymul = 0
+#                                else:
+#                                    xmul = 0
+#                                    ymul = 0
+                            else:
+#                                xmul = 0
+#                                ymul = 0
+                                if self.player.prev_move_dir == self.ACTION_LEFT or self.player.prev_move_dir == self.ACTION_RIGHT:
+                                    xmul = [-1, 1][self.player.prev_move_dir - self.ACTION_LEFT]
                                 else:
                                     xmul = 0
+                                if self.player.prev_move_dir == self.ACTION_DOWN or self.player.prev_move_dir == self.ACTION_UP:
+                                    ymul = [1, -1][self.player.prev_move_dir - self.ACTION_DOWN]
+                                else:
                                     ymul = 0
-                            else:
-                                xmul = 0
-                                ymul = 0
 
                             dx = self.player.speed * self.TAU * xmul
                             dy = self.player.speed * self.TAU * ymul
@@ -823,7 +885,9 @@ class DogFightEnv(gym.Env):
 
                         elif event.key == pygame.K_c:
                             self.prop_cfact_trajectories = []
+                            self.prop_tfact_trajectories = []
                             self.counterfactual_trajectories = []
+                            self.factual_surface.fill(self.COLOR_CLEAR_ALPHA)
 
                     elif event.type == pygame.MOUSEBUTTONDOWN and not self.reset_start:
                         if event.button == 1:
@@ -860,6 +924,11 @@ class DogFightEnv(gym.Env):
             keys = pygame.key.get_pressed()
             self.rewind = self.EVAL_MODE and self.paused and not self.perform_split_facts and keys[pygame.K_r]
 
+            #if self.perform_split_facts:
+            self.lower_surface.blit(pygame.transform.flip(self.factual_surface, False, True), (0, 0))
+            lower_flip_surf = pygame.transform.flip(self.lower_surface, False, True)
+            self.SCREEN.blit(lower_flip_surf, (0, 0))
+#            self.SCREEN.blit(self.factual_surface, (0, 0))
             pygame.display.flip()
             self.CLOCK.tick(self.metadata["render_fps"])
 

@@ -207,6 +207,7 @@ def main():
 #                rewind_memory.append(env_state)
             elif is_paused and not env.unwrapped.paused:
                 is_paused = False
+                env.unwrapped.draw_actions = False
 #                paused_state = None
 
             if not do_split_facts and env.unwrapped.perform_split_facts:
@@ -224,9 +225,24 @@ def main():
 #                if tfact_idx < traj_limit:
                 if not tfact_done:
                     with torch.no_grad():
+#                        out = policy_net(state)
+#                        action = out.sum(dim = 0).max(dim = 1)[1].view(1, 1)
+#                        qsa1 += out[:, :, action.item()]
+
+                        # If agent network chooses to shoot enemy when not visible,
+                        # force it to choose next highest q-val action
                         out = policy_net(state)
-                        action = out.sum(dim = 0).max(dim = 1)[1].view(1, 1)
-                        qsa1 += out[:, :, action.item()]
+                        cand_actions = out.sum(dim = 0).topk(k = 2, dim = 1)
+#                        cand_actions = sum(policy_net(state)).topk(k = 2, dim = 1)
+                        if (
+                            cand_actions[1][0][0].item() == env.unwrapped.ACTION_SHOOT_ENEMY and
+                            state[0][4].item() == 0
+                        ):
+                            action = cand_actions[1][0][1].view(1, 1)
+                            qsa1 += out[:, :, cand_actions[1][0][1].item()]
+                        else:
+                            action = cand_actions[1][0][0].view(1, 1)
+                            qsa1 += out[:, :, cand_actions[1][0][0].item()]
                     tfact_idx += 1
 #                elif cfact_idx < traj_limit:
                 elif not cfact_done:
@@ -284,15 +300,30 @@ def main():
                     state = rewind_memory[-1][1]
 #                    is_paused = True
 #                    env.unwrapped.paused = True
-                    env.unwrapped.draw_actions = False
 
 #            if not env.unwrapped.perform_split_facts:
             if not do_split_facts:
                 if args.evaluate or random.random() > eps:
                     with torch.no_grad():
-                        action = sum(policy_net(state)).max(dim = 1)[1].view(1, 1)
+#                        action = sum(policy_net(state)).max(dim = 1)[1].view(1, 1)
+                        # If agent network chooses to shoot enemy when not visible,
+                        # force it to choose next highest q-val action
+                        cand_actions = sum(policy_net(state)).topk(k = 2, dim = 1)
+                        if (
+                            cand_actions[1][0][0].item() == env.unwrapped.ACTION_SHOOT_ENEMY and
+                            state[0][4].item() == 0
+                        ):
+                            action = cand_actions[1][0][1].view(1, 1)
+                        else:
+                            action = cand_actions[1][0][0].view(1, 1)
+
                 else:
-                    action = torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
+                    if state[0][4].item() == 0:
+                        action = torch.tensor([[env.unwrapped.ACTION_SHOOT_ENEMY]])
+                        while action.item() == env.unwrapped.ACTION_SHOOT_ENEMY:
+                            action = torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
+                    else:
+                        action = torch.tensor([[env.action_space.sample()]], device = device, dtype = torch.long)
 
             next_state, reward, terminated, truncated, info = env.step(action.item())
             if is_paused and not do_split_facts:
@@ -451,10 +482,17 @@ def optimize_model(policy_net, target_net, optimizer, gamma, memory, nrcmp):
     ]).transpose(0, 1).flatten(1, 2)
     with torch.no_grad():
         next_state_q_values = target_net(next_states)
-        q_sum = next_state_q_values.transpose(0, 1).sum(dim = 1)
+#        q_sum = next_state_q_values.transpose(0, 1).sum(dim = 1)
+#        next_state_values = torch.stack([
+#            next_state_q_values[_].gather(1, q_sum.max(1)[1].unsqueeze(1)) for _ in range(next_state_q_values.shape[0])
+#        ]).transpose(0, 1).flatten(1, 2)
+        qt_amax = next_state_q_values.transpose(0, 1).sum(dim = 1).max(1)[1].unsqueeze(1)
         next_state_values = torch.stack([
-            next_state_q_values[_].gather(1, q_sum.max(1)[1].unsqueeze(1)) for _ in range(next_state_q_values.shape[0])
+            state_action_q_values[_].gather(1, qt_amax) for _ in range(state_action_q_values.shape[0])
         ]).transpose(0, 1).flatten(1, 2)
+#        next_state_values = torch.stack([
+#            next_state_q_values[_].gather(1, q_sum.max(1)[1].unsqueeze(1)) for _ in range(next_state_q_values.shape[0])
+#        ]).transpose(0, 1).flatten(1, 2)
 
     expected_state_action_values = drewards + (1 - terminations.unsqueeze(1).float()) * gamma * next_state_values
 
