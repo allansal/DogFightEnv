@@ -972,7 +972,8 @@ class DogFightEnv(gym.Env):
         self.player_last_dist = state_dict["player_last_dist"]
         self.player_missile_id_counter = state_dict["player_missile_id"]
 
-# More generic entity class for the game
+# A generic entity class for use in the game environment. This will encapsulate many commonly
+# shared attributes between objects in the game (e.g. x & y positions, speed, angle, etc.)
 class Entity():
     def __init__(self, x, y, speed = 0, angle = 0, radius = 1, fov = 0):
         self.x = x
@@ -1012,6 +1013,7 @@ class Entity():
             return False
 
     # Is a point / entity in the field of view of this entity
+    # Used for hard-coded enemy chasing / shooting behavior
     def in_fov(self, other):
         if not (
             isinstance(other, Entity) or
@@ -1044,12 +1046,14 @@ class Entity():
 
         return np.sqrt(dx ** 2 + dy ** 2, dtype = np.float64)
 
+    # Move the entity based on the timestep tau, its speed, and angle
     def move(self, tau):
         # Update position
         self.x += self.speed * np.cos(self.angle) * tau
         self.y += self.speed * np.sin(self.angle) * tau
 
-    # Get angle to point or other entity
+    # Get the angle from this entity's front to a point in the environment or
+    # another entity in range [-pi, pi]
     def angle_to(self, other):
         if isinstance(other, Entity):
             dx = other.x - self.x
@@ -1065,10 +1069,12 @@ class Entity():
         abs_angle = np.arctan2(dy, dx)
         rel_angle = abs_angle - self.angle
 
+        # Ensure angle is in range [-pi, pi]
         return np.arctan2(np.sin(rel_angle), np.cos(rel_angle), dtype = np.float64)
 
-# Missiles have a limited range, and player missiles check for firing
-# within the target zone
+# Missiles extend the entity class by having limited range, and player missiles
+# check for their intended target on collision, along with a flag for whether or
+# not they were fired within the target's firing zone
 class Missile(Entity):
     def __init__(self, x, y, speed, angle, radius, range, fov = 0, id = None, fired_in_zone = False, target = None):
         super().__init__(x, y, speed, angle, radius, fov)        
@@ -1083,7 +1089,9 @@ class Missile(Entity):
             )
         self.range = range
 
-# Jets have a more complicated move function
+# A common base class for the player agent and the hard-coded enemies,
+# also extend the base entity class with a more complicated movement
+# function.
 class Jet(Entity):
     def __init__(
         self,
@@ -1149,6 +1157,7 @@ class Jet(Entity):
         else:
             return 0
 
+    # Jet movement has constraints like min/max speed, turn rate, and acceleration (removed since older version)
     def move(self, tau, acceleration = 0, turn_direction = 0):
         # Get the turn rate
         if turn_direction != 0:
@@ -1176,7 +1185,8 @@ class Jet(Entity):
         self.x += self.speed * np.cos(self.angle) * tau
         self.y += self.speed * np.sin(self.angle) * tau
 
-# Player can have multiple missiles out
+# Player extends jet class by having missiles, can have multiple missiles active at once
+# also has simpler movement function to hopefully improve the RL agent learning.
 class Player(Jet):
     def __init__(
         self,
@@ -1209,6 +1219,7 @@ class Player(Jet):
         self.missiles = []
         self.prev_move_dir = prev_move_dir
 
+    # Player agent can move in orthogonal directions (up, down, left, right)
     def move(self, tau, action):
         if action == 0:
             self.y -= self.speed * tau
@@ -1219,7 +1230,8 @@ class Player(Jet):
         else:
             self.x += self.speed * tau
 
-# Enemies have a single missile
+# Enemies can only have a single missile out at once, hence the inheritance,
+# also a flag for whether the enemy is alive or not (used for step logic and drawing)
 class Enemy(Jet):
     def __init__(
         self,
