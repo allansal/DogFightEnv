@@ -27,6 +27,11 @@ By default, this will train an agent in a headless environment. You must modify 
 
 `python DQN_DogFight.py --help`
 
+As an example, say you want to load checkpoint 1000 in the ./checkpoints/test_run/ directory, then you would enter the command:
+
+`python DQN_DogFight.py --checkpoint-dir test_run --load-checkpoint 1000`
+
+
 A summary of all the parameters is provided in the table below.
 
 | Parameter | Description |
