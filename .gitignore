@@ -7,6 +7,7 @@
 !.gitignore
 !install_as.sh
 !DQN_DogFight.py
+!XRL_Environment_Technical_Documentation.pdf
 !checkpoints/**/*.*
 !gym-env/setup.py
 !gym-env/README.md

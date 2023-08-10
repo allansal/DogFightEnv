@@ -20,6 +20,7 @@ class DogFightEnv(gym.Env):
         self.EVAL_MODE = eval_mode
 
         # Episode time & time limit
+        # Simulation time-step "tau"
         self.TAU = 1 / self.metadata["render_fps"]
         self.STEP_LIMIT = time_limit * self.metadata["render_fps"]
 
@@ -136,6 +137,12 @@ class DogFightEnv(gym.Env):
         self.REWARD_PLAYER_LEAVES_GAME = -100
         self.REWARD_TIME_PENALTY = -2 * self.TAU
         self.REWARD_APPROACH_TARGET = abs(self.REWARD_TIME_PENALTY)
+
+        # Decomposed reward info:
+        # RIND_* variables are the indices in the decomposed reward
+        # vector, so RIND_APPROACH_TARGET = 6 means that index 6 in the
+        # decomposed reward vector `drewards` corresponds to the reward
+        # associated with approaching the target in this step
         self.N_REWARD_COMPONENTS = 7
         self.RIND_MISSILE_MISS = 0
         self.RIND_MISSILE_HIT_ENEMY = 1
@@ -145,6 +152,10 @@ class DogFightEnv(gym.Env):
         self.RIND_TIME_PENALTY = 5
         self.RIND_APPROACH_TARGET = 6
 
+        # The observation space. Here we define a continuous observation space `gym.spaces.Box`.
+        # We also define the minimum and maximum values that each observation component can take.
+        # Gym / Gymnasium will spit out warnings if an observation is returned outside of this range.
+        # The observations are:
         # 0.) Jet absolute x position
         # 1.) Jet absolute y position
         # 2.) Angle to target (from player coord-system)
@@ -155,6 +166,11 @@ class DogFightEnv(gym.Env):
         # 7.) Enemy bullet visibility
         # 8.) Angle to enemy bullet (from player coord-system)
         # 9.) Distance to enemy bullet
+
+        # TODO: I didn't want to deal with calculating the actual min. and max. values at the time,
+        #       so I just set them to the min. and max. 64-bit float values. However through testing,
+        #       all the normalized observations seemed to stay in the range of ~[-1, 1], so it may be
+        #       better practice to set them explicitly here.
         self.observation_space = gym.spaces.Box(
             low = np.array([
                 np.finfo(np.float64).min,
@@ -183,7 +199,7 @@ class DogFightEnv(gym.Env):
             dtype = np.float64
         )
 
-        # Environment action space:
+        # Environment action space (discrete action space):
         # 0.) Down
         # 1.) Up
         # 2.) Left
@@ -198,6 +214,7 @@ class DogFightEnv(gym.Env):
         self.ACTION_SHOOT_TARGET = 4
         self.ACTION_SHOOT_ENEMY  = 5
 
+        # Trajectory constants (mostly used for counterfactual drawing)
         self.TRAJ_MOVE = 0
         self.TRAJ_SHOOT_TARGET = 1
         self.TRAJ_SHOOT_ENEMY  = 2
@@ -205,13 +222,21 @@ class DogFightEnv(gym.Env):
         # ====================================================================
         # Frequently updated variables (save most for getting / setting state)
         # ====================================================================
+        # The actions returned to the DQN code for execution
         self.counterfactual_trajectories = []
+
+        # Line endpoints for drawing the factual and counterfactual trajectories, these
+        # are stored as a tuple of 3 elements:
+        # ((x0, y0), (x1, y1), n)
+        # where n is an integer specifying whether this
+        # line segment indicates agent movement (no shooting), or shooting (target and enemy, different cases)
+        # SEE THE self.TRAJ_X variables for the actual values, the third element in the tuple is used purely for drawing purposes.
         self.prop_cfact_trajectories = []
         self.prop_tfact_trajectories = []
+
         self.reset_start = True
         self.state = None
         self.perform_split_facts = False
-#        self.draw_actions = False
         self.rewind = False
 
         self.player = None
@@ -237,26 +262,26 @@ class DogFightEnv(gym.Env):
         self.action = action
         # Additional dictionary to track missile information for assigning
         # delayed rewards to the proper step (done outside the environment)
+        # also for returning the decomposed rewards
         step_info = {
-            "shoot_act"    : False, # missile related action this step
-            "shoot_id"     : None,  # the id of the missile shot during this step
-            "hit_ids"      : [],    # the ids of the missiles that hit this step
-            "miss_ids"     : [],    # the ids of the missiles that missed this step
-            "hit_rewards"  : [],    # rewards for the missiles that hit
-            "miss_rewards" : [],    # rewards (penalties) for the missiles that missed
-            "dreward"      : [0] * self.N_REWARD_COMPONENTS,
-            "dhit_ind"     : [],
-            "dmis_ind"     : [],
+            "shoot_act"    : False,                          # missile related action this step
+            "shoot_id"     : None,                           # the id of the missile shot during this step
+            "hit_ids"      : [],                             # the ids of the missiles that hit this step
+            "miss_ids"     : [],                             # the ids of the missiles that missed this step
+            "hit_rewards"  : [],                             # rewards for the missiles that hit
+            "miss_rewards" : [],                             # rewards (penalties) for the missiles that missed
+            "dreward"      : [0] * self.N_REWARD_COMPONENTS, # decomposed rewards
+            "dhit_ind"     : [],                             # whether missile hit target or enemy to assign reward to proper component slot
+            "dmis_ind"     : [],                             # whether missile missed target to assign reward to proper component slot
         }
 
+        # Return immediately if the simulation is paused and the factual / counterfactual split isn't being executed
         if self.EVAL_MODE and self.RENDER_MODE == "human":
-#            if self.paused and not self.perform_split_facts:
             if self.paused and not self.perform_split_facts:
                 self.render()
                 return np.array(self.state, dtype = np.float64), 0, False, False, step_info
-#                if self.paused:
-#                    return np.array(self.state, dtype = np.float64), 0, False, False, step_info
 
+        # Track starting position for factual trajectory drawing
         if self.perform_split_facts:
             self.player_starting_pos = (self.player.x, self.player.y)
 
@@ -324,7 +349,6 @@ class DogFightEnv(gym.Env):
                         self.enemy.guess_position = None
                 # Turn back to the center of the game area if the enemy has no target to pursue
                 elif not self.enemy.in_area(*(self.WORLD_AREA)):
-#                    enemy_turn_direction = self.enemy.get_turn_direction_to((self.ORIGIN[0], self.ORIGIN[1]))
                     enemy_turn_direction = self.enemy.get_turn_direction_to(self.ORIGIN)
             # If the player is in range
             else:
@@ -350,11 +374,17 @@ class DogFightEnv(gym.Env):
         # Move the player
         p_oob = False
         old_pos = self.player.x, self.player.y
+
+        # If the action was set to shooting the target or enemy, continue moving
+        # the agent along its previous direction so it won't stay in place.
         if action == self.ACTION_SHOOT_TARGET or action == self.ACTION_SHOOT_ENEMY:
             self.player.move(self.TAU, self.player.prev_move_dir)
         else:
             self.player.move(self.TAU, action)
             self.player.prev_move_dir = action
+
+        # If the agent's movement resulted in it going out of bounds, put it
+        # back in bounds and give it a penalty (done later).
         if not self.player.in_area(*(self.WORLD_AREA)):
             p_oob = True
             self.player.x, self.player.y = old_pos[0], old_pos[1]
@@ -407,6 +437,7 @@ class DogFightEnv(gym.Env):
                 self.enemy.missile = None
             elif self.player.collides_with(self.enemy.missile):
                 p_hit_by_missile = True
+
         # The player collides with the enemy (terminating condition)
         if p_hit_by_missile or (not self.enemy.dead and self.enemy.collides_with(self.player)):
             step_info["dreward"][self.RIND_PLAYER_COLLIDES_WITH_ENEMY] = self.REWARD_PLAYER_COLLIDES_WITH_ENEMY
@@ -414,6 +445,7 @@ class DogFightEnv(gym.Env):
         else:
             if p_oob:
                 step_info["dreward"][self.RIND_PLAYER_LEAVES_GAME] = self.REWARD_PLAYER_LEAVES_GAME
+
             # Constant negative reward to encourage the agent to finish sooner
             if p_shot_at_nothing:
                 step_info["dreward"][self.RIND_MISSILE_MISS] = self.REWARD_MISSILE_MISS
@@ -485,7 +517,6 @@ class DogFightEnv(gym.Env):
         self.reset_start = True
         self.state = None
         self.perform_split_facts = False
-#        self.draw_actions = False
         self.rewind = False
 
         self.player = None
@@ -573,6 +604,8 @@ class DogFightEnv(gym.Env):
 
         return np.array(self.state, dtype = np.float64), {"dreward" : [0] * self.N_REWARD_COMPONENTS}
 
+    # TODO: there really is no point in this being a separate function, this can
+    #       just be placed back in the render function when drawing the jets
     def _get_jet_vertices(self, jet):
         jet_vertices = [
             (
@@ -620,9 +653,7 @@ class DogFightEnv(gym.Env):
                 self.CLOCK = pygame.time.Clock()
 
         # Reset / clear the surfaces each frame
-#        if not self.paused:
         self.factual_surface.fill(self.COLOR_CLEAR_ALPHA)
-#        if not self.perform_split_facts:
         self.lower_surface.fill(self.COLOR_GRAY)
         self.pobs_surface.fill(self.COLOR_CLEAR_ALPHA)
         self.eobs_surface.fill(self.COLOR_CLEAR_ALPHA)
@@ -687,51 +718,50 @@ class DogFightEnv(gym.Env):
                 missile.radius
             )
 
-#        lower_flip_surf = pygame.transform.flip(self.lower_surface, False, True)
-#        self.SCREEN.blit(lower_flip_surf, (0, 0))
 
         # PyGame event handling and timing
         if self.RENDER_MODE == "human":
             if self.paused and self.EVAL_MODE and not self.rewind:
+                # Line endpoints for counterfactual trajectory drawing
                 if self.prop_cfact_trajectories:
                     for idx, point_pair in enumerate(self.prop_cfact_trajectories):
                         pygame.draw.line(
-#                            self.SCREEN,
                             self.factual_surface,
                             self.COLOR_WHITE,
                             point_pair[0],
                             point_pair[1],
-                            2
+                            width = 2
                         )
+                        # If the trajectory entailed shooting the target or enemy, draw the line endpoints,
+                        # but add a circle at the end to indicate the action. (Remember we still draw line
+                        # endpoints since the agent moves while shooting)
                         if point_pair[2] == self.TRAJ_SHOOT_ENEMY:
                             pygame.draw.circle(
-#                                self.SCREEN,
                                 self.factual_surface,
                                 self.COLOR_RED,
                                 point_pair[1],
-                                0.35 * self.PLAYER_RADIUS
+                                radius = 0.35 * self.PLAYER_RADIUS
                             )
                         if point_pair[2] == self.TRAJ_SHOOT_TARGET:
                             pygame.draw.circle(
-#                                self.SCREEN,
                                 self.factual_surface,
                                 self.COLOR_BLUE,
                                 point_pair[1],
-                                0.35 * self.PLAYER_RADIUS
+                                radius = 0.35 * self.PLAYER_RADIUS
                             )
+
+                # Line endpoints for factual trajectory drawing
                 if self.prop_tfact_trajectories:
                     for idx, point_pair in enumerate(self.prop_tfact_trajectories):
                         pygame.draw.line(
-#                            self.SCREEN,
                             self.factual_surface,
                             self.COLOR_BLACK,
                             point_pair[0],
                             point_pair[1],
-                            2
+                            width = 2
                         )
                         if point_pair[2] == self.TRAJ_SHOOT_ENEMY:
                             pygame.draw.circle(
-#                                self.SCREEN,
                                 self.factual_surface,
                                 self.COLOR_RED,
                                 point_pair[1],
@@ -739,19 +769,20 @@ class DogFightEnv(gym.Env):
                             )
                         if point_pair[2] == self.TRAJ_SHOOT_TARGET:
                             pygame.draw.circle(
-#                                self.SCREEN,
                                 self.factual_surface,
                                 self.COLOR_BLUE,
                                 point_pair[1],
                                 0.35 * self.PLAYER_RADIUS
                             )
-#            elif not self.perform_split_facts:
+
+            # We're unpaused, so we are not performing the factual / counterfactual split
             else:
                 self.counterfactual_trajectories = []
                 self.prop_cfact_trajectories = []
                 self.prop_tfact_trajectories = []
 
-#            if self.draw_actions:
+            # Draw a trace of the agent's trajectory when performing the
+            # factual / counterfactual split
             if self.perform_split_facts:
                 if self.action == self.ACTION_SHOOT_ENEMY:
                     tmp_traj = self.TRAJ_SHOOT_ENEMY
@@ -759,50 +790,35 @@ class DogFightEnv(gym.Env):
                     tmp_traj = self.TRAJ_SHOOT_TARGET
                 else:
                     tmp_traj = self.TRAJ_MOVE
-#                self.prop_tfact_trajectories.append((self.player_starting_pos[0], self.player_starting_pos[1]), tmp_traj)
                 self.prop_tfact_trajectories.append(((self.player_starting_pos[0], self.MAX_Y - self.player_starting_pos[1]),
                                                     (self.player.x, self.MAX_Y - self.player.y),
                                                     tmp_traj)
                 )
-#                            self.prop_cfact_trajectories.append((pp0, pp1, self.TRAJ_SHOOT_TARGET if event.key == pygame.K_t else self.TRAJ_SHOOT_ENEMY))
-#                pygame.draw.line(
-##                    self.SCREEN,
-#                    self.factual_surface,
-#                    self.COLOR_BLACK,
-#                    (self.player_starting_pos[0], self.MAX_Y - self.player_starting_pos[1]),
-#                    (self.player.x, self.MAX_Y - self.player.y),
-#                    2
-#                )
-#                if self.action == self.ACTION_SHOOT_ENEMY:
-#                    pygame.draw.circle(
-##                        self.SCREEN,
-#                        self.factual_surface,
-#                        self.COLOR_RED,
-#                        (self.player.x, self.MAX_Y - self.player.y),
-#                        0.35 * self.PLAYER_RADIUS
-#                    )
-#                elif self.action == self.ACTION_SHOOT_TARGET:
-#                    pygame.draw.circle(
-##                        self.SCREEN,
-#                        self.factual_surface,
-#                        self.COLOR_BLUE,
-#                        (self.player.x, self.MAX_Y - self.player.y),
-#                        0.35 * self.PLAYER_RADIUS
-#                    )
-#                factual_surface_flip = pygame.transform.flip(self.lower_surface, False, True)
-#                self.SCREEN.blit(factual_surface_flip, (0, 0))
+
+            # Handle user inputs
             for event in pygame.event.get():
                 if self.EVAL_MODE and not self.perform_split_facts:
+                    # A key was pressed
                     if event.type == pygame.KEYDOWN and not self.reset_start:
+                        # Pause using spacebar
                         if event.key == pygame.K_SPACE:
                             self.paused = not self.paused
+
+                        # Press `enter` to confirm the proposed counterfactual trajectory
+                        # and have the agent perform the split factual / counterfactual
+                        # (this is done in the main DQN_DogFight.py file)
                         elif event.key == pygame.K_RETURN:
                             if len(self.counterfactual_trajectories) > 0:
                                 self.perform_split_facts = True
-#                                self.paused = False
-#                            print(f"counterfactual trajectory:\n{self.counterfactual_trajectories}")
+
+                        # Press `x` key in order to undo the last addition to the proposed
+                        # counterfactual trajectory (does nothing if nothing has been
+                        # added to the trajectory yet)
                         elif event.key == pygame.K_x and self.prop_cfact_trajectories:
                             tmp = self.prop_cfact_trajectories.pop()
+                            # A single proposed `movement` trajectory (just from clicking the mouse button)
+                            # can entail multiple steps of moving. If this is the case, we remove all those
+                            # steps at once.
                             if tmp[2] == self.TRAJ_MOVE:
                                 ny = round(abs(tmp[1][1] - tmp[0][1]) / (self.player.speed * self.TAU))
                                 nx = round(abs(tmp[1][0] - tmp[0][0]) / (self.player.speed * self.TAU))
@@ -814,45 +830,30 @@ class DogFightEnv(gym.Env):
                                 self.counterfactual_trajectories.pop()
                                 if self.prop_tfact_trajectories:
                                     self.prop_tfact_trajectories.pop()
+
+                        # Propose shooting at the enemy or target
                         elif event.key == pygame.K_e or event.key == pygame.K_t:
+
+                            # If this is the first motion in the proposed trajectory, the
+                            # first endpoint is the player agent's current position
                             if not self.prop_cfact_trajectories:
                                 pp0 = (self.player.x, self.MAX_Y - self.player.y)
+                            # Otherwise, it is the last point pair's endpoint
                             else:
                                 pp0 = (self.prop_cfact_trajectories[-1][1][0], self.prop_cfact_trajectories[-1][1][1])
 
+                            # Get the player agent's previous move direction so we can add the endpoint
+                            # in the proper direction such that the drawn proposed counterfactual would
+                            # actually match up to what would be preformed.
                             if self.prop_cfact_trajectories:
-#                                if self.prop_cfact_trajectories[-1][2] == self.TRAJ_SHOOT_ENEMY or self.prop_cfact_trajectories[-1][2] == self.TRAJ_SHOOT_TARGET:
-#                                if len(self.prop_cfact_trajectories) == 1:
-#                                    if self.player.prev_move_dir == self.ACTION_LEFT or self.player.prev_move_dir == self.ACTION_RIGHT:
-#                                        xmul = [-1, 1][self.player.prev_move_dir - self.ACTION_LEFT]
-#                                    else:
-#                                        xmul = 0
-#                                    if self.player.prev_move_dir == self.ACTION_DOWN or self.player.prev_move_dir == self.ACTION_UP:
-#                                        ymul = [1, -1][self.player.prev_move_dir - self.ACTION_DOWN]
-#                                    else:
-#                                        ymul = 0
-#                                else:
                                 lkbk = -1
-#                                if (
-#                                    self.prop_cfact_trajectories[-2][1][0] == self.prop_cfact_trajectories[-2][0][0] and
-#                                    self.prop_cfact_trajectories[-2][1][1] == self.prop_cfact_trajectories[-2][0][1]
-#                                ):
-#                                    lkbk = -1
-#                                else:
-#                                    lkbk = -2
                                 if self.prop_cfact_trajectories[lkbk][1][0] == self.prop_cfact_trajectories[lkbk][0][0]:
                                     xmul = 0
                                     ymul = np.sign(self.prop_cfact_trajectories[lkbk][1][1] - self.prop_cfact_trajectories[lkbk][0][1])
-#                                elif self.prop_cfact_trajectories[lkbk][1][1] == self.prop_cfact_trajectories[lkbk][0][1]:
                                 else:
                                     xmul = np.sign(self.prop_cfact_trajectories[lkbk][1][0] - self.prop_cfact_trajectories[lkbk][0][0])
                                     ymul = 0
-#                                else:
-#                                    xmul = 0
-#                                    ymul = 0
                             else:
-#                                xmul = 0
-#                                ymul = 0
                                 if self.player.prev_move_dir == self.ACTION_LEFT or self.player.prev_move_dir == self.ACTION_RIGHT:
                                     xmul = [-1, 1][self.player.prev_move_dir - self.ACTION_LEFT]
                                 else:
@@ -875,20 +876,22 @@ class DogFightEnv(gym.Env):
                                 else:
                                     pp1 = (self.prop_cfact_trajectories[-1][1][0] + dx, self.prop_cfact_trajectories[-1][1][1])
 
+                            # Append the proper action to the counterfactual move list
                             if event.key == pygame.K_t:
                                 self.counterfactual_trajectories.append(self.ACTION_SHOOT_TARGET)
-#                                print("Requires shooting target")
                             else:
                                 self.counterfactual_trajectories.append(self.ACTION_SHOOT_ENEMY)
-#                                print("Requires shooting enemy")
                             self.prop_cfact_trajectories.append((pp0, pp1, self.TRAJ_SHOOT_TARGET if event.key == pygame.K_t else self.TRAJ_SHOOT_ENEMY))
 
+                        # Press `c` key in order to clear out the proposed factual / counterfactual
+                        # trajectory split
                         elif event.key == pygame.K_c:
                             self.prop_cfact_trajectories = []
                             self.prop_tfact_trajectories = []
                             self.counterfactual_trajectories = []
                             self.factual_surface.fill(self.COLOR_CLEAR_ALPHA)
 
+                    # Mouse button 1 (left mouse) was pressed
                     elif event.type == pygame.MOUSEBUTTONDOWN and not self.reset_start:
                         if event.button == 1:
                             if not self.prop_cfact_trajectories:
@@ -896,9 +899,14 @@ class DogFightEnv(gym.Env):
                             else:
                                 pp0 = (self.prop_cfact_trajectories[-1][1][0], self.prop_cfact_trajectories[-1][1][1])
 
+                            # How many steps worth of movement just got proposed based on the distance
+                            # between the agent and the mouse cursor?
                             xmul = round((event.pos[0] - pp0[0]) / (self.player.speed * self.TAU))
                             ymul = round((event.pos[1] - pp0[1]) / (self.player.speed * self.TAU))
 
+                            # TODO: We only snap to one dimension (x or y) depending on which distance
+                            #       component between the agent and cursor was bigger. This could be
+                            #       expanded to handle x and y component with a bit more code.
                             dx = self.player.speed * self.TAU * xmul
                             dy = self.player.speed * self.TAU * ymul
                             if abs(dy) > abs(dx):
@@ -912,15 +920,18 @@ class DogFightEnv(gym.Env):
                                 else:
                                     pp1 = (self.prop_cfact_trajectories[-1][1][0] + dx, self.prop_cfact_trajectories[-1][1][1])
 
+                            # Only add the trajectory if the distance between the agent and cursor
+                            # was at least 1 step's worth of distance covered (either x or y dir.)
                             if abs(xmul) > 0 or abs(ymul) > 0:
                                 if abs(dy) > abs(dx):
-#                                    print(f"Requires going {abs(ymul)} steps {'up' if ymul < 0 else 'down'}")
                                     self.counterfactual_trajectories += [self.ACTION_UP if ymul < 0 else self.ACTION_DOWN] * abs(ymul)
                                 else:
-#                                    print(f"Requires going {abs(xmul)} steps {'left' if xmul < 0 else 'right'}")
                                     self.counterfactual_trajectories += [self.ACTION_LEFT if xmul < 0 else self.ACTION_RIGHT] * abs(xmul)
                                 self.prop_cfact_trajectories.append((pp0, pp1, self.TRAJ_MOVE))
 
+            # Rewind key `r` is being pressed--this is handled differently / separately since
+            # we are letting the key repeat while held down unlike the other key events
+            # which occur only on press
             keys = pygame.key.get_pressed()
             self.rewind = self.EVAL_MODE and self.paused and not self.perform_split_facts and keys[pygame.K_r]
 
@@ -928,7 +939,6 @@ class DogFightEnv(gym.Env):
             self.lower_surface.blit(pygame.transform.flip(self.factual_surface, False, True), (0, 0))
             lower_flip_surf = pygame.transform.flip(self.lower_surface, False, True)
             self.SCREEN.blit(lower_flip_surf, (0, 0))
-#            self.SCREEN.blit(self.factual_surface, (0, 0))
             pygame.display.flip()
             self.CLOCK.tick(self.metadata["render_fps"])
 
@@ -938,31 +948,8 @@ class DogFightEnv(gym.Env):
             pygame.display.quit()
             pygame.quit()
 
-#        self.counterfactual_trajectories = []
-#        self.prop_cfact_trajectories = []
-#        self.reset_start = True
-#        self.state = None
-#        self.perform_split_facts = False
-#        self.draw_actions = False
-#
-#        self.player = None
-#        self.enemy = None
-#        self.target = None
-#
-#        self.step_count = 0
-#        self.player_last_dist = np.finfo(np.float64).max
-#        self.paused = False
-#        self.player_missile_id_counter = 0
-#
-#        self.lower_surface   = None
-#        self.pobs_surface    = None
-#        self.eobs_surface    = None
-#        self.zone_surface    = None
-#        self.factual_surface = None
-#
-#        self.action = None
-#        self.player_starting_pos = None
-
+    # Get the current state of the environment (i.e., get deep copies of all entities that move,
+    # and all relevant counter variables)
     def get_state(self):
         state_dict = {
             "state"             : deepcopy(self.state),
@@ -975,6 +962,7 @@ class DogFightEnv(gym.Env):
         }
         return state_dict
 
+    # Converse to get_state, it sets the environment state to a previously saved version.
     def set_state(self, state_dict):
         self.state = deepcopy(state_dict["state"])
         self.player = deepcopy(state_dict["player"])
